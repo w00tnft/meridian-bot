@@ -43,7 +43,7 @@ const isMain = entrypointPath
 if (isMain) {
   log("startup", "DLMM LP Agent starting...");
   log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
-  log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
+  log("startup", `Model: ${process.env.LLM_MODEL || "deepseek/deepseek-r1"}`);
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
   startHiveMindBackgroundSync();
@@ -1560,6 +1560,74 @@ async function telegramHandler(msg) {
 
   if (text === "/candidates") {
     await sendMessage(describeLatestCandidates(5)).catch(() => {});
+    return;
+  }
+
+  if (text === "/thresholds") {
+    const s = config.screening;
+    const perf = getPerformanceSummary();
+    const perfLines = perf
+      ? `\nBased on ${perf.total_positions_closed} closed positions\nWin rate: ${perf.win_rate_pct}%  |  Avg PnL: ${perf.avg_pnl_pct}%`
+      : "\nNo closed positions yet — thresholds are preset defaults.";
+    await sendMessage(
+      `📊 Screening Thresholds\n\n` +
+      `minFeeActiveTvlRatio: ${s.minFeeActiveTvlRatio}\n` +
+      `minOrganic: ${s.minOrganic}\n` +
+      `minHolders: ${s.minHolders}\n` +
+      `minTvl: ${s.minTvl}\n` +
+      `maxTvl: ${s.maxTvl}\n` +
+      `minVolume: ${s.minVolume}\n` +
+      `minTokenFeesSol: ${s.minTokenFeesSol}\n` +
+      `maxBundlePct: ${s.maxBundlePct}\n` +
+      `maxBotHoldersPct: ${s.maxBotHoldersPct}\n` +
+      `maxTop10Pct: ${s.maxTop10Pct}\n` +
+      `timeframe: ${s.timeframe}` +
+      perfLines
+    ).catch(() => {});
+    return;
+  }
+
+  if (text.startsWith("/learn")) {
+    const parts = text.split(" ");
+    const poolArg = parts[1] || null;
+    busy = true;
+    let liveMessage = null;
+    try {
+      let poolsToStudy = [];
+      if (poolArg) {
+        poolsToStudy = [{ pool: poolArg, name: poolArg }];
+      } else {
+        liveMessage = await createLiveMessage("📚 Learn", "Fetching top pool candidates...");
+        const { candidates } = await getTopCandidates({ limit: 10 });
+        if (!candidates.length) {
+          if (liveMessage) await liveMessage.finalize("No eligible pools found to study.");
+          else await sendMessage("No eligible pools found to study.").catch(() => {});
+          busy = false;
+          return;
+        }
+        poolsToStudy = candidates.map((c) => ({ pool: c.pool, name: c.name }));
+      }
+      if (!liveMessage) liveMessage = await createLiveMessage("📚 Learn", `Studying ${poolsToStudy.length} pool(s)...`);
+      const poolList = poolsToStudy.map((p, i) => `${i + 1}. ${p.name} (${p.pool})`).join("\n");
+      const { content } = await agentLoop(
+        `Study top LPers across these ${poolsToStudy.length} pools by calling study_top_lpers for each:\n\n${poolList}\n\nFor each pool, call study_top_lpers then move to the next. After studying all pools:\n1. Identify patterns that appear across multiple pools (hold time, scalping vs holding, win rates).\n2. Note pool-specific patterns where behaviour differs significantly.\n3. Derive 4-8 concrete, actionable lessons using add_lesson. Prioritize cross-pool patterns.\n4. Summarize what you learned.`,
+        config.llm.maxSteps, [], "GENERAL", config.llm.generalModel, null,
+        {
+          interactive: true,
+          onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
+          onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
+        }
+      );
+      if (liveMessage) await liveMessage.finalize(stripThink(content));
+      else await sendMessage(stripThink(content)).catch(() => {});
+    } catch (e) {
+      if (liveMessage) await liveMessage.fail(e.message).catch(() => {});
+      else await sendMessage(`Error: ${e.message}`).catch(() => {});
+    } finally {
+      busy = false;
+      refreshPrompt();
+      drainTelegramQueue().catch(() => {});
+    }
     return;
   }
 
