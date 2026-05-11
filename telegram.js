@@ -401,19 +401,19 @@ export function stopPolling() {
 // ─── Notification helpers ────────────────────────────────────────
 export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
   if (hasActiveLiveMessage()) return;
-  const priceStr = priceRange
-    ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
+  const rangeStr = priceRange
+    ? `Range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
     : "";
   const coverageStr = rangeCoverage
-    ? `Range cover: ${fmtPct(rangeCoverage.downside_pct)} downside | ${fmtPct(rangeCoverage.upside_pct)} upside | ${fmtPct(rangeCoverage.width_pct)} total\n`
+    ? `Coverage: ${fmtPct(rangeCoverage.downside_pct)} down | ${fmtPct(rangeCoverage.upside_pct)} up\n`
     : "";
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
   await sendHTML(
-    `✅ <b>Deployed</b> ${pair}\n` +
-    `Amount: ${amountSol} SOL\n` +
-    priceStr +
+    `🟢 <b>Opened</b>: ${pair}\n` +
+    `Deployed: ${amountSol} SOL\n` +
+    rangeStr +
     coverageStr +
     poolStr +
     `Position: <code>${position?.slice(0, 8)}...</code>\n` +
@@ -421,13 +421,27 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+export async function notifyClose({ pair, pnlUsd, pnlPct, feesUsd = null, reason = null }) {
   if (hasActiveLiveMessage()) return;
-  const sign = pnlUsd >= 0 ? "+" : "";
-  await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
-  );
+  const sign = (pnlUsd ?? 0) >= 0 ? "+" : "";
+  const pnlStr = `${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`;
+  const r = String(reason || "").toLowerCase();
+  if (r.includes("velocity") || r.includes("dump") || r.includes("safety")) {
+    return sendHTML(`🚨 <b>Emergency close</b>: ${pair} — rapid dump detected\nPnL: ${pnlStr}`);
+  }
+  if (r.includes("stop loss")) {
+    return sendHTML(`🔴 <b>SL hit</b>: ${pair} closed at ${(pnlPct ?? 0).toFixed(2)}%\nPnL: ${pnlStr}`);
+  }
+  if ((pnlPct ?? 0) > 0) {
+    const feesStr = feesUsd != null ? `\nFees earned: $${feesUsd.toFixed(2)}` : "";
+    return sendHTML(`✅ <b>Closed</b>: ${pair} +${(pnlPct ?? 0).toFixed(2)}%\nPnL: ${pnlStr}${feesStr}`);
+  }
+  await sendHTML(`🔒 <b>Closed</b> ${pair}\nPnL: ${pnlStr}`);
+}
+
+export async function notifyOorApproaching({ pair }) {
+  if (hasActiveLiveMessage()) return;
+  await sendHTML(`⚠️ <b>Warning</b>: ${pair} is approaching range boundary — monitoring closely`);
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
