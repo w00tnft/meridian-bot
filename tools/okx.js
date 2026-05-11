@@ -257,6 +257,44 @@ export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
 }
 
 /**
+ * Price velocity circuit breaker.
+ * Uses 5m price change from OKX (closest available to 15m; more sensitive, appropriate for a circuit breaker).
+ * Returns deploy_blocked (>= deployThresholdPct drop) and emergency_close (>= emergencyThresholdPct drop).
+ */
+export async function checkPriceVelocity(mint, { deployThresholdPct = -5, emergencyThresholdPct = -8 } = {}) {
+  if (!mint) return { mint, deploy_blocked: false, emergency_close: false, blocked: false, reason: null };
+  let price;
+  try {
+    price = await getPriceInfo(mint);
+  } catch {
+    return { mint, deploy_blocked: false, emergency_close: false, blocked: false, reason: null };
+  }
+  if (!price) return { mint, deploy_blocked: false, emergency_close: false, blocked: false, reason: null };
+
+  const change5m = price.price_change_5m;
+  const change1h = price.price_change_1h;
+  const deployBlocked = change5m != null && change5m <= deployThresholdPct;
+  const emergencyClose = change5m != null && change5m <= emergencyThresholdPct;
+
+  let reason = null;
+  if (emergencyClose) {
+    reason = `[SAFETY] Price velocity block — rapid dump detected: ${change5m}% in 5m (emergency threshold: ${emergencyThresholdPct}%)`;
+  } else if (deployBlocked) {
+    reason = `[SAFETY] Price velocity block — rapid dump detected: ${change5m}% in 5m (deploy threshold: ${deployThresholdPct}%)`;
+  }
+
+  return {
+    mint,
+    price_change_5m: change5m,
+    price_change_1h: change1h,
+    deploy_blocked: deployBlocked,
+    emergency_close: emergencyClose,
+    blocked: deployBlocked || emergencyClose,
+    reason,
+  };
+}
+
+/**
  * Fetch all three in parallel — use this during screening enrichment.
  */
 export async function getFullTokenAnalysis(tokenAddress, chainIndex = CHAIN_SOLANA) {

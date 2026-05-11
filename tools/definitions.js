@@ -556,6 +556,31 @@ NOTE: Requires mint address. If you only have a symbol/name, call get_token_info
   {
     type: "function",
     function: {
+      name: "check_price_velocity",
+      description: `Check the short-term price velocity of a token to detect rapid dumps.
+Uses the OKX 5-minute price change as the velocity signal (most recent available window).
+
+Returns deploy_blocked (true if 5m drop >= 5%) and emergency_close (true if 5m drop >= 8%).
+Also returns raw price_change_5m and price_change_1h for context.
+
+SCREENER: call this before deploying. If deploy_blocked is true, skip this candidate.
+MANAGER: call this if you suspect a rapid dump. If emergency_close is true, close immediately regardless of PnL.`,
+      parameters: {
+        type: "object",
+        properties: {
+          mint: {
+            type: "string",
+            description: "Base token mint address (base58) to check"
+          }
+        },
+        required: ["mint"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
       name: "get_token_narrative",
       description: `Get the narrative or story behind a token from Jupiter ChainInsight.
 Returns a plain-text description of what the token is about — its origin, theme, community, and activity.

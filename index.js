@@ -28,6 +28,7 @@ import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { checkPriceVelocity } from "./tools/okx.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -226,6 +227,21 @@ export async function runManagementCycle({ silent = false } = {}) {
       return { ...p, recall: recallForPool(p.pool) };
     });
 
+    // Price velocity emergency circuit breaker — runs before any LLM or rule check
+    const velocityCloseSet = new Set();
+    await Promise.allSettled(positionData.map(async (p) => {
+      if (!p.base_mint) return;
+      try {
+        const velocity = await checkPriceVelocity(p.base_mint, { emergencyThresholdPct: -8 });
+        if (velocity.emergency_close) {
+          velocityCloseSet.add(p.position);
+          log("safety", `[SAFETY] Price velocity block — rapid dump detected for ${p.pair}: ${velocity.reason}`);
+        }
+      } catch (e) {
+        log("executor_warn", `Price velocity check failed for ${p.pair}: ${e.message}`);
+      }
+    }));
+
     // JS trailing TP check
     const exitMap = new Map();
     for (const p of positionData) {
@@ -253,6 +269,11 @@ export async function runManagementCycle({ silent = false } = {}) {
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
     const actionMap = new Map();
     for (const p of positionData) {
+      // Velocity circuit breaker — absolute highest priority
+      if (velocityCloseSet.has(p.position)) {
+        actionMap.set(p.position, { action: "CLOSE", rule: "velocity", reason: "[SAFETY] Price velocity — emergency close (rapid dump)" });
+        continue;
+      }
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
         actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });

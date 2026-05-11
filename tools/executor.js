@@ -1,4 +1,5 @@
 import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
+import { checkPriceVelocity } from "./okx.js";
 import {
   getActiveBin,
   deployPosition,
@@ -248,6 +249,7 @@ const toolMap = {
   get_token_info: getTokenInfo,
   get_token_holders: getTokenHolders,
   get_token_narrative: getTokenNarrative,
+  check_price_velocity: checkPriceVelocity,
   add_smart_wallet: addSmartWallet,
   remove_smart_wallet: removeSmartWallet,
   list_smart_wallets: listSmartWallets,
@@ -768,6 +770,17 @@ async function runSafetyChecks(name, args) {
           pass: false,
           reason: `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
         };
+      }
+
+      // Price velocity circuit breaker — block deploy on rapid dumps
+      try {
+        const velocity = await checkPriceVelocity(args.base_mint);
+        if (velocity.deploy_blocked) {
+          log("safety", `[SAFETY] Price velocity block — rapid dump detected for ${args.base_mint}: ${velocity.reason}`);
+          return { pass: false, reason: velocity.reason };
+        }
+      } catch (e) {
+        log("executor_warn", `Price velocity check failed for ${args.base_mint}: ${e.message}`);
       }
 
       // Check amount limits
