@@ -141,9 +141,9 @@ export const config = {
     temperature: u.temperature ?? 0.373,
     maxTokens:   u.maxTokens   ?? 4096,
     maxSteps:    u.maxSteps    ?? 20,
-    managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "deepseek/deepseek-r1",
-    screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "deepseek/deepseek-r1",
-    generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "deepseek/deepseek-r1",
+    managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "deepseek/deepseek-v4-flash",
+    screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "deepseek/deepseek-v4-flash",
+    generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "deepseek/deepseek-v4-flash",
   },
 
   // ─── Darwinian Signal Weighting ───────
