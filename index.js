@@ -22,6 +22,7 @@ import {
   answerCallbackQuery,
   notifyOutOfRange,
   notifyOorApproaching,
+  notifyBtcDowntrend,
   isEnabled as telegramEnabled,
   createLiveMessage,
 } from "./telegram.js";
@@ -29,7 +30,7 @@ import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
-import { checkPriceVelocity } from "./tools/okx.js";
+import { checkPriceVelocity, checkBtcTrend } from "./tools/okx.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -211,6 +212,18 @@ export async function runManagementCycle({ silent = false } = {}) {
   const screeningCooldownMs = 5 * 60 * 1000;
 
   try {
+    // BTC correlation filter — runs first, before any position logic
+    let btcCheck = { downtrend: false, blocked: false, btc_change_4h: null };
+    try {
+      btcCheck = await checkBtcTrend();
+      if (btcCheck.downtrend) {
+        log("safety", `[SAFETY] BTC downtrend detected: ${btcCheck.btc_change_4h}% in 4h — tightening management`);
+        notifyBtcDowntrend({ change4h: btcCheck.btc_change_4h }).catch(() => {});
+      }
+    } catch (e) {
+      log("executor_warn", `BTC trend check failed in management cycle: ${e.message}`);
+    }
+
     if (!silent && telegramEnabled()) {
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
     }
@@ -244,6 +257,20 @@ export async function runManagementCycle({ silent = false } = {}) {
         log("executor_warn", `Price velocity check failed for ${p.pair}: ${e.message}`);
       }
     }));
+
+    // BTC downtrend tightening — close weak positions when BTC is in freefall
+    const btcCloseSet = new Set();
+    if (btcCheck.downtrend) {
+      for (const p of positionData) {
+        if (velocityCloseSet.has(p.position)) continue;
+        const trackedOrganic = getTrackedPosition(p.position)?.organic_score ?? 100;
+        const pnl = p.pnl_pct ?? 0;
+        if (trackedOrganic < 80 && pnl < -5) {
+          btcCloseSet.add(p.position);
+          log("safety", `[SAFETY] BTC tightening: closing ${p.pair} — organic ${trackedOrganic} < 80 and PnL ${pnl}% < -5%`);
+        }
+      }
+    }
 
     // OOR early warning — alert if in-range position is within 10% of lower boundary
     for (const p of positionData) {
@@ -296,6 +323,11 @@ export async function runManagementCycle({ silent = false } = {}) {
       // Velocity circuit breaker — absolute highest priority
       if (velocityCloseSet.has(p.position)) {
         actionMap.set(p.position, { action: "CLOSE", rule: "velocity", reason: "[SAFETY] Price velocity — emergency close (rapid dump)" });
+        continue;
+      }
+      // BTC downtrend tightening — close weak positions
+      if (btcCloseSet.has(p.position)) {
+        actionMap.set(p.position, { action: "CLOSE", rule: "btc_downtrend", reason: `[SAFETY] BTC downtrend — closing weak position (organic < 80, PnL < -5%)` });
         continue;
       }
       // Hard exit — highest priority

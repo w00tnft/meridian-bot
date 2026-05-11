@@ -1,5 +1,5 @@
 import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
-import { checkPriceVelocity } from "./okx.js";
+import { checkPriceVelocity, checkBtcTrend } from "./okx.js";
 import {
   getActiveBin,
   deployPosition,
@@ -13,7 +13,7 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { setPositionInstruction, recordClosedToken, isTokenOnCooldown } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -73,6 +73,12 @@ function poolDetailVolatility(pool) {
   return numberOrNull(pool?.volatility);
 }
 
+function poolDetailTokenCreatedAt(pool) {
+  const ts = pool?.token_x?.created_at;
+  if (!ts) return null;
+  return Math.floor((Date.now() - Number(ts)) / 3_600_000); // hours old
+}
+
 async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.timeframe || "5m") {
   const encodedTimeframe = encodeURIComponent(timeframe);
   const filter = encodeURIComponent(`pool_address=${poolAddress}`);
@@ -127,6 +133,16 @@ async function validateDeployPoolThresholds(args) {
     return {
       pass: false,
       reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+    };
+  }
+
+  // Strategy 2: pool/token age must be at least 72 hours
+  const tokenAgeHours = poolDetailTokenCreatedAt(detail);
+  const MIN_POOL_AGE_HOURS = 72;
+  if (tokenAgeHours != null && tokenAgeHours < MIN_POOL_AGE_HOURS) {
+    return {
+      pass: false,
+      reason: `[SAFETY] Pool age block: ${args.pool_address} is only ${tokenAgeHours} hours old — minimum ${MIN_POOL_AGE_HOURS} hours required`,
     };
   }
 
@@ -250,6 +266,7 @@ const toolMap = {
   get_token_holders: getTokenHolders,
   get_token_narrative: getTokenNarrative,
   check_price_velocity: checkPriceVelocity,
+  check_btc_trend: checkBtcTrend,
   add_smart_wallet: addSmartWallet,
   remove_smart_wallet: removeSmartWallet,
   list_smart_wallets: listSmartWallets,
@@ -603,6 +620,7 @@ export async function executeTool(name, args) {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
       } else if (name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0, feesUsd: result.fees_usd ?? null, reason: args.reason ?? null }).catch(() => {});
+        if (result.base_mint) recordClosedToken(result.base_mint, args.reason ?? null);
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
@@ -770,6 +788,24 @@ async function runSafetyChecks(name, args) {
           pass: false,
           reason: `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
         };
+      }
+
+      // Strategy 1: re-entry cooldown — block if this mint was closed < 4h ago
+      if (isTokenOnCooldown(args.base_mint)) {
+        const msg = `[SAFETY] Re-entry blocked: ${args.base_mint.slice(0, 8)}... was closed less than 4 hours ago — cooldown active`;
+        log("safety", msg);
+        return { pass: false, reason: msg };
+      }
+
+      // Strategy 3: BTC downtrend — block all new opens when BTC is in freefall
+      try {
+        const btc = await checkBtcTrend();
+        if (btc.blocked) {
+          log("safety", btc.reason);
+          return { pass: false, reason: btc.reason };
+        }
+      } catch (e) {
+        log("executor_warn", `BTC trend check failed: ${e.message}`);
       }
 
       // Price velocity + volatility window circuit breakers, and bin range adjustment
