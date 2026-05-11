@@ -602,7 +602,7 @@ export async function executeTool(name, args) {
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
       } else if (name === "close_position") {
-        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0, feesUsd: result.fees_usd ?? null, reason: args.reason ?? null }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
@@ -772,12 +772,34 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      // Price velocity circuit breaker — block deploy on rapid dumps
+      // Price velocity + volatility window circuit breakers, and bin range adjustment
       try {
         const velocity = await checkPriceVelocity(args.base_mint);
         if (velocity.deploy_blocked) {
           log("safety", `[SAFETY] Price velocity block — rapid dump detected for ${args.base_mint}: ${velocity.reason}`);
           return { pass: false, reason: velocity.reason };
+        }
+        // Feature 4: block if 1h move is too large in either direction
+        if (velocity.volatility_blocked) {
+          log("safety", velocity.reason);
+          return { pass: false, reason: velocity.reason };
+        }
+        // Feature 1: adjust bins_below based on 24h price range
+        const range24h = Math.abs(velocity.price_change_24h ?? velocity.price_change_1h ?? 0);
+        if (range24h > 0 && args.bins_below != null) {
+          const minBins = config.strategy.minBinsBelow;
+          const maxBins = config.strategy.maxBinsBelow;
+          let targetBins = args.bins_below;
+          if (range24h > 15) {
+            targetBins = Math.max(args.bins_below, Math.round(minBins + 0.75 * (maxBins - minBins)));
+          } else if (range24h < 8) {
+            targetBins = Math.min(args.bins_below, Math.round(minBins + 0.40 * (maxBins - minBins)));
+          }
+          targetBins = Math.max(minBins, Math.min(maxBins, targetBins));
+          if (targetBins !== args.bins_below) {
+            log("strategy", `[STRATEGY] Bin range adjusted for volatility: ${range24h.toFixed(1)}% 24h range → bins_below ${args.bins_below} → ${targetBins}`);
+            args.bins_below = targetBins;
+          }
         }
       } catch (e) {
         log("executor_warn", `Price velocity check failed for ${args.base_mint}: ${e.message}`);

@@ -21,6 +21,7 @@ import {
   editMessageWithButtons,
   answerCallbackQuery,
   notifyOutOfRange,
+  notifyOorApproaching,
   isEnabled as telegramEnabled,
   createLiveMessage,
 } from "./telegram.js";
@@ -87,6 +88,8 @@ let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
+const _oorWarningThrottle = new Map(); // position → epoch ms of last OOR-approaching alert (1h debounce)
+const OOR_WARNING_THROTTLE_MS = 60 * 60 * 1000;
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
@@ -241,6 +244,27 @@ export async function runManagementCycle({ silent = false } = {}) {
         log("executor_warn", `Price velocity check failed for ${p.pair}: ${e.message}`);
       }
     }));
+
+    // OOR early warning — alert if in-range position is within 10% of lower boundary
+    for (const p of positionData) {
+      if (!p.in_range) continue;
+      if (p.lower_bin == null || p.upper_bin == null || p.active_bin == null) continue;
+      const totalRange = p.upper_bin - p.lower_bin;
+      if (totalRange <= 0) continue;
+      const distFromLower = p.active_bin - p.lower_bin;
+      const nearBoundary = (distFromLower / totalRange) < 0.10;
+      if (nearBoundary) {
+        const lastWarn = _oorWarningThrottle.get(p.position) ?? 0;
+        if (Date.now() - lastWarn >= OOR_WARNING_THROTTLE_MS) {
+          _oorWarningThrottle.set(p.position, Date.now());
+          log("cron", `OOR approaching: ${p.pair} — active bin ${p.active_bin} within 10% of lower ${p.lower_bin}`);
+          notifyOorApproaching({ pair: p.pair }).catch(() => {});
+        }
+      } else {
+        // Reset throttle once back in safe zone so a future approach triggers again
+        _oorWarningThrottle.delete(p.position);
+      }
+    }
 
     // JS trailing TP check
     const exitMap = new Map();
@@ -949,6 +973,10 @@ function getDeterministicCloseRule(position, managementConfig) {
     (position.age_minutes ?? 0) >= 60
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
+  }
+  // Max position age: close after 5 days to avoid silent IL accumulation
+  if ((position.age_minutes ?? 0) >= 5 * 24 * 60) {
+    return { action: "CLOSE", rule: 6, reason: "max age reached (5 days)" };
   }
   return null;
 }

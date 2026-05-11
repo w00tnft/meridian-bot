@@ -248,6 +248,7 @@ export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
     price_vs_ath_pct: maxPrice > 0 ? parseFloat(((price / maxPrice) * 100).toFixed(1)) : null,
     price_change_5m:  pct(d.priceChange5M),
     price_change_1h:  pct(d.priceChange1H),
+    price_change_24h: pct(d.priceChange24H),
     volume_5m:        pct(d.volume5M),
     volume_1h:        pct(d.volume1H),
     holders:          int(d.holders),
@@ -261,35 +262,42 @@ export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
  * Uses 5m price change from OKX (closest available to 15m; more sensitive, appropriate for a circuit breaker).
  * Returns deploy_blocked (>= deployThresholdPct drop) and emergency_close (>= emergencyThresholdPct drop).
  */
-export async function checkPriceVelocity(mint, { deployThresholdPct = -5, emergencyThresholdPct = -8 } = {}) {
-  if (!mint) return { mint, deploy_blocked: false, emergency_close: false, blocked: false, reason: null };
+export async function checkPriceVelocity(mint, { deployThresholdPct = -5, emergencyThresholdPct = -8, volatilityThresholdPct = 12 } = {}) {
+  if (!mint) return { mint, deploy_blocked: false, emergency_close: false, volatility_blocked: false, blocked: false, reason: null };
   let price;
   try {
     price = await getPriceInfo(mint);
   } catch {
-    return { mint, deploy_blocked: false, emergency_close: false, blocked: false, reason: null };
+    return { mint, deploy_blocked: false, emergency_close: false, volatility_blocked: false, blocked: false, reason: null };
   }
-  if (!price) return { mint, deploy_blocked: false, emergency_close: false, blocked: false, reason: null };
+  if (!price) return { mint, deploy_blocked: false, emergency_close: false, volatility_blocked: false, blocked: false, reason: null };
 
-  const change5m = price.price_change_5m;
-  const change1h = price.price_change_1h;
-  const deployBlocked = change5m != null && change5m <= deployThresholdPct;
-  const emergencyClose = change5m != null && change5m <= emergencyThresholdPct;
+  const change5m  = price.price_change_5m;
+  const change1h  = price.price_change_1h;
+  const change24h = price.price_change_24h;
+
+  const deployBlocked      = change5m != null && change5m <= deployThresholdPct;
+  const emergencyClose     = change5m != null && change5m <= emergencyThresholdPct;
+  const volatilityBlocked  = change1h != null && Math.abs(change1h) > volatilityThresholdPct;
 
   let reason = null;
   if (emergencyClose) {
     reason = `[SAFETY] Price velocity block — rapid dump detected: ${change5m}% in 5m (emergency threshold: ${emergencyThresholdPct}%)`;
   } else if (deployBlocked) {
     reason = `[SAFETY] Price velocity block — rapid dump detected: ${change5m}% in 5m (deploy threshold: ${deployThresholdPct}%)`;
+  } else if (volatilityBlocked) {
+    reason = `[SAFETY] Volatility window block — 1h move too large: ${change1h.toFixed(1)}%`;
   }
 
   return {
     mint,
-    price_change_5m: change5m,
-    price_change_1h: change1h,
-    deploy_blocked: deployBlocked,
-    emergency_close: emergencyClose,
-    blocked: deployBlocked || emergencyClose,
+    price_change_5m:  change5m,
+    price_change_1h:  change1h,
+    price_change_24h: change24h,
+    deploy_blocked:     deployBlocked,
+    emergency_close:    emergencyClose,
+    volatility_blocked: volatilityBlocked,
+    blocked: deployBlocked || emergencyClose || volatilityBlocked,
     reason,
   };
 }
