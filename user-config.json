@@ -1,5 +1,7 @@
 {
   "publicApiKey": "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz",
   "useDiscordSignals": false,
-  "discordSignalMode": "merge"
+  "discordSignalMode": "merge",
+  "maxPositions": 2,
+  "stopLossPct": -15
 }

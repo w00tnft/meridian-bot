@@ -753,17 +753,21 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      // Block same base token across different pools
-      if (args.base_mint) {
-        const alreadyHasMint = positions.positions.some(
-          (p) => p.base_mint === args.base_mint
-        );
-        if (alreadyHasMint) {
-          return {
-            pass: false,
-            reason: `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
-          };
-        }
+      // Block same base token across different pools — base_mint is required
+      if (!args.base_mint) {
+        return {
+          pass: false,
+          reason: "base_mint is required to verify no duplicate token position exists. Provide base_mint and retry.",
+        };
+      }
+      const alreadyHasMint = positions.positions.some(
+        (p) => p.base_mint === args.base_mint
+      );
+      if (alreadyHasMint) {
+        return {
+          pass: false,
+          reason: `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
+        };
       }
 
       // Check amount limits
