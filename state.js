@@ -27,9 +27,11 @@ function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
   return cleaned || null;
 }
 
+const RE_ENTRY_COOLDOWN_HOURS = 4;
+
 function load() {
   if (!fs.existsSync(STATE_FILE)) {
-    return { positions: {}, recentEvents: [], lastUpdated: null };
+    return { positions: {}, recentEvents: [], recentlyClosedTokens: {}, lastUpdated: null };
   }
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
@@ -187,6 +189,30 @@ export function recordClose(position_address, reason) {
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
   save(state);
   log("state", `Position ${position_address} marked closed: ${reason}`);
+}
+
+/**
+ * Record that a token mint was just closed. Used for re-entry cooldown checks.
+ */
+export function recordClosedToken(mint, reason = null) {
+  if (!mint) return;
+  const state = load();
+  if (!state.recentlyClosedTokens) state.recentlyClosedTokens = {};
+  state.recentlyClosedTokens[mint] = { closedAt: new Date().toISOString(), reason: reason || null };
+  save(state);
+  log("state", `Re-entry cooldown started for mint ${mint.slice(0, 8)}...`);
+}
+
+/**
+ * Returns true if the given mint was closed within the cooldown window.
+ */
+export function isTokenOnCooldown(mint, cooldownHours = RE_ENTRY_COOLDOWN_HOURS) {
+  if (!mint) return false;
+  const state = load();
+  const entry = state.recentlyClosedTokens?.[mint];
+  if (!entry?.closedAt) return false;
+  const msSinceClosed = Date.now() - new Date(entry.closedAt).getTime();
+  return msSinceClosed < cooldownHours * 3_600_000;
 }
 
 /**

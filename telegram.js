@@ -444,6 +444,11 @@ export async function notifyOorApproaching({ pair }) {
   await sendHTML(`⚠️ <b>Warning</b>: ${pair} is approaching range boundary — monitoring closely`);
 }
 
+export async function notifyBtcDowntrend({ change4h }) {
+  const pct = typeof change4h === "number" ? change4h.toFixed(1) : "?";
+  await sendHTML(`🚨 <b>BTC Alert</b>: Market in downtrend (${pct}% 4h) — new entries suspended, monitoring open positions closely`);
+}
+
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(

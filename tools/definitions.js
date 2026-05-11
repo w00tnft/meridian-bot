@@ -556,6 +556,24 @@ NOTE: Requires mint address. If you only have a symbol/name, call get_token_info
   {
     type: "function",
     function: {
+      name: "check_btc_trend",
+      description: `Check BTC's 4-hour price change to detect broad market downtrends.
+Returns btc_change_4h (%) and blocked (true if BTC dropped > 3% in 4h).
+
+If blocked is true:
+- Do NOT open any new positions
+- For open positions: consider closing those with organic_score < 80 AND PnL < -5%
+- Result is cached for 5 minutes to avoid redundant API calls`,
+      parameters: {
+        type: "object",
+        properties: {}
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
       name: "check_price_velocity",
       description: `Check the short-term price velocity of a token to detect rapid dumps.
 Uses the OKX 5-minute price change as the velocity signal (most recent available window).

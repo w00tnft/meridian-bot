@@ -302,6 +302,54 @@ export async function checkPriceVelocity(mint, { deployThresholdPct = -5, emerge
   };
 }
 
+// BTC candles use OKX spot market (different base from web3 endpoints)
+const OKX_SPOT_BASE = "https://www.okx.com";
+let _btcTrendCache = null;
+let _btcTrendCachedAt = 0;
+const BTC_CACHE_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Fetch BTC's 4h price change via OKX spot candles.
+ * Fails safe: if the request fails, returns blocked=false so the bot is never locked by an outage.
+ */
+export async function checkBtcTrend({ changeThresholdPct = -3 } = {}) {
+  if (_btcTrendCache && Date.now() - _btcTrendCachedAt < BTC_CACHE_MS) {
+    return _btcTrendCache;
+  }
+  try {
+    const url = `${OKX_SPOT_BASE}/api/v5/market/candles?instId=BTC-USDT&bar=4H&limit=2`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`OKX BTC candles ${res.status}`);
+    const json = await res.json();
+    if (json.code !== "0") throw new Error(`OKX BTC error: ${json.msg}`);
+    const candles = json.data;
+    if (!Array.isArray(candles) || candles.length < 2) {
+      return { btc_change_4h: null, downtrend: false, blocked: false, reason: null };
+    }
+    const currentClose = parseFloat(candles[0][4]);
+    const prevClose    = parseFloat(candles[1][4]);
+    if (!Number.isFinite(currentClose) || !Number.isFinite(prevClose) || prevClose === 0) {
+      return { btc_change_4h: null, downtrend: false, blocked: false, reason: null };
+    }
+    const change4h = parseFloat((((currentClose - prevClose) / prevClose) * 100).toFixed(2));
+    const downtrend = change4h <= changeThresholdPct;
+    const result = {
+      btc_price: currentClose,
+      btc_change_4h: change4h,
+      downtrend,
+      blocked: downtrend,
+      reason: downtrend
+        ? `[SAFETY] BTC downtrend block: BTC ${change4h}% in 4h — entries suspended`
+        : null,
+    };
+    _btcTrendCache = result;
+    _btcTrendCachedAt = Date.now();
+    return result;
+  } catch {
+    return { btc_change_4h: null, downtrend: false, blocked: false, reason: null };
+  }
+}
+
 /**
  * Fetch all three in parallel — use this during screening enrichment.
  */
