@@ -632,6 +632,7 @@ export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletS
     walletSol  != null ? `✅ Wallet       ${Number(walletSol).toFixed(3)} SOL`  : null,
     deployAmount != null ? `📊 Deploy       ${deployAmount} SOL`                : null,
     "",
+    "━━━ 🤖 AI ANALYSIS ━━━",
     content || "No report",
     SEP,
   ].filter(v => v !== null);

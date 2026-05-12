@@ -730,59 +730,31 @@ STEPS:
    pass deploy_position.volatility = the candidate volatility value.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
-4. Report in this exact format (no tables, no extra sections):
-   🚀 DEPLOYED
+4. Report your decision using EXACTLY this format — no markdown bold, no paragraphs, no extra sections:
 
-   <pool name>
-   <pool address>
+   If deploying:
+   🏆 BEST CANDIDATE: <pool name>
+   ⭐ Score: <X.X>/5 | 📊 TVL: $<x>k | 💹 Vol: $<x>k | 🎯 Organic: <x>%
 
-   ◎ <deploy amount> SOL | <strategy> | bin <active_bin>
-   Range: <minPrice> → <maxPrice>
-   Range cover: <downside %> downside | <upside %> upside | <total width %> total
+   👉 DECISION: DEPLOY
 
-   IMPORTANT:
-   - Do NOT calculate the range percentages yourself.
-   - Use the actual deploy_position tool result:
-     range_coverage.downside_pct
-     range_coverage.upside_pct
-     range_coverage.width_pct
+   ❌ SKIPPED:
+   • <token name> — <one-line reason>
+   • <token name> — <one-line reason>
 
-   MARKET
-   Fee/TVL: <x>%
-   Volume: $<x>
-   TVL: $<x>
-   Volatility: <x>
-   Organic: <x>
-   Mcap: $<x>
-   Age: <x>h
+   If not deploying:
+   🏆 BEST CANDIDATE: <pool name or none>
 
-   AUDIT
-   Top10: <x>%
-   Bots: <x>%
-   Fees paid: <x> SOL
-   Smart wallets: <names or none>
+   👉 DECISION: NO DEPLOY
 
-   RISK
-   <If OKX advanced/risk data exists, list only the fields that actually exist: Risk level, Bundle, Sniper, Suspicious, ATH distance, Rugpull, Wash.>
-   <If only rugpull/wash exist, list just those.>
-   <If OKX enrichment is missing, write exactly: OKX: unavailable>
-
-   WHY THIS WON
-   <2-4 concise sentences on why this pool won, key risks, and why it still beat the alternatives>
-5. If no pool qualifies, report in this exact format instead:
-   ⛔ NO DEPLOY
-
-   Cycle finished with no valid entry.
-
-   BEST LOOKING CANDIDATE
-   <name or none>
-
-   WHY SKIPPED
-   <2-4 concise sentences explaining why nothing was good enough>
-
-   REJECTED
-   <short flat list of top candidate names and why they were skipped>
+   ❌ SKIPPED:
+   • <token name> — <one-line reason>
+   • <token name> — <one-line reason>
+5. After calling deploy_position, append only:
+   ✅ Deployed <pool name> — ◎<amount> SOL | bin <active_bin> | range <downside%> down
 IMPORTANT:
+- Never write markdown bold (**text**) in your response.
+- Never write long paragraphs. Keep each reason to one line maximum.
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
