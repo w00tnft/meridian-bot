@@ -25,6 +25,8 @@ import {
   notifyBtcDowntrend,
   isEnabled as telegramEnabled,
   createLiveMessage,
+  buildManagementCycleHtml,
+  buildScreeningCycleHtml,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
@@ -208,17 +210,19 @@ export async function runManagementCycle({ silent = false } = {}) {
   log("cron", "Starting management cycle");
   let mgmtReport = null;
   let positions = [];
+  let positionData = [];
+  let actionMap = new Map();
   let liveMessage = null;
+  let btcCheckResult = { downtrend: false, blocked: false, btc_change_4h: null };
   const screeningCooldownMs = 5 * 60 * 1000;
 
   try {
     // BTC correlation filter — runs first, before any position logic
-    let btcCheck = { downtrend: false, blocked: false, btc_change_4h: null };
     try {
-      btcCheck = await checkBtcTrend();
-      if (btcCheck.downtrend) {
-        log("safety", `[SAFETY] BTC downtrend detected: ${btcCheck.btc_change_4h}% in 4h — tightening management`);
-        notifyBtcDowntrend({ change4h: btcCheck.btc_change_4h }).catch(() => {});
+      btcCheckResult = await checkBtcTrend();
+      if (btcCheckResult.downtrend) {
+        log("safety", `[SAFETY] BTC downtrend detected: ${btcCheckResult.btc_change_4h}% in 4h — tightening management`);
+        notifyBtcDowntrend({ change4h: btcCheckResult.btc_change_4h, openPositions: positions.length }).catch(() => {});
       }
     } catch (e) {
       log("executor_warn", `BTC trend check failed in management cycle: ${e.message}`);
@@ -238,7 +242,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     }
 
     // Snapshot + load pool memory
-    const positionData = positions.map((p) => {
+    positionData = positions.map((p) => {
       recordPositionSnapshot(p.pool, p);
       return { ...p, recall: recallForPool(p.pool) };
     });
@@ -260,7 +264,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // BTC downtrend tightening — close weak positions when BTC is in freefall
     const btcCloseSet = new Set();
-    if (btcCheck.downtrend) {
+    if (btcCheckResult.downtrend) {
       for (const p of positionData) {
         if (velocityCloseSet.has(p.position)) continue;
         const trackedOrganic = getTrackedPosition(p.position)?.organic_score ?? 100;
@@ -285,7 +289,8 @@ export async function runManagementCycle({ silent = false } = {}) {
         if (Date.now() - lastWarn >= OOR_WARNING_THROTTLE_MS) {
           _oorWarningThrottle.set(p.position, Date.now());
           log("cron", `OOR approaching: ${p.pair} — active bin ${p.active_bin} within 10% of lower ${p.lower_bin}`);
-          notifyOorApproaching({ pair: p.pair }).catch(() => {});
+          const boundaryPct = Math.round((distFromLower / totalRange) * 100);
+          notifyOorApproaching({ pair: p.pair, boundaryPct }).catch(() => {});
         }
       } else {
         // Reset throttle once back in safe zone so a future approach triggers again
@@ -318,7 +323,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // ── Deterministic rule checks (no LLM) ──────────────────────────
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
-    const actionMap = new Map();
+    actionMap = new Map();
     for (const p of positionData) {
       // Velocity circuit breaker — absolute highest priority
       if (velocityCloseSet.has(p.position)) {
@@ -439,9 +444,29 @@ After executing, write a brief one-line result per position.
   } finally {
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
-      if (mgmtReport) {
+      if (positionData.length > 0) {
+        const noAction = !positionData.some(p => {
+          const a = actionMap.get(p.position);
+          return a && a.action !== "STAY";
+        });
+        try {
+          const html = buildManagementCycleHtml({ positionData, actionMap, noAction });
+          if (liveMessage) {
+            await liveMessage.finalize("✅ Done").catch(() => {});
+            sendHTML(html).catch(() => {});
+          } else {
+            sendHTML(html).catch(() => {});
+          }
+        } catch (e) {
+          log("cron_warn", `Management HTML format failed: ${e.message}`);
+          if (mgmtReport) {
+            if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
+            else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => {});
+          }
+        }
+      } else if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => {});
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -465,6 +490,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let prePositions, preBalance;
   let liveMessage = null;
   let screenReport = null;
+  let screenWalletSol = null;
+  let screenDeployAmount = null;
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
     if (prePositions.total_positions >= config.risk.maxPositions) {
@@ -508,6 +535,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
     const deployAmount = computeDeployAmount(currentBalance.sol);
+    screenWalletSol = currentBalance.sol;
+    screenDeployAmount = deployAmount;
     log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
 
     // Load active strategy
@@ -792,8 +821,24 @@ IMPORTANT:
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        try {
+          const html = buildScreeningCycleHtml({
+            content: stripThink(screenReport),
+            btcCheck: null,
+            walletSol: screenWalletSol,
+            deployAmount: screenDeployAmount,
+          });
+          if (liveMessage) {
+            await liveMessage.finalize("✅ Done").catch(() => {});
+            sendHTML(html).catch(() => {});
+          } else {
+            sendHTML(html).catch(() => {});
+          }
+        } catch (e) {
+          log("cron_warn", `Screening HTML format failed: ${e.message}`);
+          if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
+          else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => {});
+        }
       }
     }
   }

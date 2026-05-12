@@ -1608,6 +1608,7 @@ export async function closePosition({ position_address, reason }) {
           pnl_usd: pnlUsd,
           pnl_pct: pnlPct,
           base_mint: livePosition?.base_mint || null,
+          minutes_held: minutesHeld,
         };
       }
 
@@ -1881,6 +1882,7 @@ export async function closePosition({ position_address, reason }) {
         pnl_usd: pnlUsd,
         pnl_pct: pnlPct,
         base_mint: pool.lbPair.tokenXMint.toString(),
+        minutes_held: minutesHeld,
       };
     }
 
