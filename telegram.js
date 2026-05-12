@@ -8,6 +8,38 @@ const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
 const BASE  = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;
+
+// ─── Formatting helpers ──────────────────────────────────────────
+const SEP = "━━━━━━━━━━━━━━━━━━━━━━━";
+
+function escHtml(str) {
+  return String(str ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function fmtAge(minutes) {
+  const m = Math.round(Number(minutes) || 0);
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  if (h === 0) return `${rem}m`;
+  return rem === 0 ? `${h}h` : `${h}h ${rem}m`;
+}
+
+function fmtUtcTime(d = new Date()) {
+  return (d instanceof Date ? d : new Date()).toISOString().slice(11, 16) + " UTC";
+}
+
+function fmtUtcDate(d = new Date()) {
+  return (d instanceof Date ? d : new Date()).toLocaleDateString("en-US", {
+    day: "numeric", month: "short", year: "numeric", timeZone: "UTC",
+  });
+}
+
+function fmtPnl(pnlUsd, pnlPct) {
+  const u = Number(pnlUsd) || 0;
+  const p = Number(pnlPct) || 0;
+  const sign = u >= 0 ? "+" : "";
+  return `${sign}$${Math.abs(u).toFixed(2)} (${sign}${Math.abs(p).toFixed(1)}%)`;
+}
 const ALLOWED_USER_IDS = new Set(
   String(process.env.TELEGRAM_ALLOWED_USER_IDS || "")
     .split(",")
@@ -402,75 +434,210 @@ export function stopPolling() {
 export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
   if (hasActiveLiveMessage()) return;
   const rangeStr = priceRange
-    ? `Range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
-    : "";
-  const coverageStr = rangeCoverage
-    ? `Coverage: ${fmtPct(rangeCoverage.downside_pct)} down | ${fmtPct(rangeCoverage.upside_pct)} up\n`
-    : "";
-  const poolStr = (binStep || baseFee)
-    ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
-    : "";
+    ? `$${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} — $${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}`
+    : "—";
+  const now = new Date();
   await sendHTML(
-    `🟢 <b>Opened</b>: ${pair}\n` +
-    `Deployed: ${amountSol} SOL\n` +
-    rangeStr +
-    coverageStr +
-    poolStr +
-    `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+`╔═══════════════════════╗
+║  🟢 POSITION OPENED   ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+💵 Deployed ${amountSol} SOL
+📐 Bin Step ${binStep ?? "?"}
+🎯 Range    ${rangeStr}
+⏰ Opened   ${fmtUtcDate(now)} ${fmtUtcTime(now)}
+${SEP}`
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct, feesUsd = null, reason = null }) {
+export async function notifyClose({ pair, pnlUsd, pnlPct, feesUsd = null, reason = null, heldMinutes = null }) {
   if (hasActiveLiveMessage()) return;
-  const sign = (pnlUsd ?? 0) >= 0 ? "+" : "";
-  const pnlStr = `${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`;
   const r = String(reason || "").toLowerCase();
+  const pnlStr = fmtPnl(pnlUsd, pnlPct);
+  const pnlEmoji = (Number(pnlUsd) || 0) >= 0 ? "✅" : "🔴";
+  const ageStr = heldMinutes != null ? fmtAge(heldMinutes) : "—";
+  const feeStr = feesUsd != null ? `\n💎 Fees     $${Number(feesUsd).toFixed(2)}` : "";
+
   if (r.includes("velocity") || r.includes("dump") || r.includes("safety")) {
-    return sendHTML(`🚨 <b>Emergency close</b>: ${pair} — rapid dump detected\nPnL: ${pnlStr}`);
+    return sendHTML(
+`╔═══════════════════════╗
+║  🚨 EMERGENCY CLOSE   ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+⚡ Trigger  Dump detected
+💰 PnL      ${pnlStr}${feeStr}
+✅ Position closed safely
+${SEP}`
+    );
   }
+
   if (r.includes("stop loss")) {
-    return sendHTML(`🔴 <b>SL hit</b>: ${pair} closed at ${(pnlPct ?? 0).toFixed(2)}%\nPnL: ${pnlStr}`);
+    return sendHTML(
+`╔═══════════════════════╗
+║   🔴 STOP LOSS HIT    ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+⏱️ Held     ${ageStr}
+💰 PnL      ${pnlStr}${feeStr}
+📤 Reason   Stop loss triggered
+🛡️ Capital  Protected
+${SEP}`
+    );
   }
-  if ((pnlPct ?? 0) > 0) {
-    const feesStr = feesUsd != null ? `\nFees earned: $${feesUsd.toFixed(2)}` : "";
-    return sendHTML(`✅ <b>Closed</b>: ${pair} +${(pnlPct ?? 0).toFixed(2)}%\nPnL: ${pnlStr}${feesStr}`);
-  }
-  await sendHTML(`🔒 <b>Closed</b> ${pair}\nPnL: ${pnlStr}`);
+
+  const isProfit = (Number(pnlUsd) || 0) >= 0;
+  const header = isProfit
+    ? "╔═══════════════════════╗\n║   ✅ POSITION CLOSED  ║\n╚═══════════════════════╝"
+    : "╔═══════════════════════╗\n║   🔴 POSITION CLOSED  ║\n╚═══════════════════════╝";
+  const reasonLabel = reason
+    ? escHtml(String(reason).replace(/\[SAFETY\]\s*/i, "").trim().slice(0, 40))
+    : "—";
+
+  return sendHTML(
+`${header}
+🪙 Token    ${escHtml(pair)}
+⏱️ Held     ${ageStr}
+💰 PnL      ${pnlStr} ${pnlEmoji}${feeStr}
+📤 Reason   ${reasonLabel}
+${SEP}`
+  );
 }
 
-export async function notifyOorApproaching({ pair }) {
+export async function notifyOorApproaching({ pair, boundaryPct = null }) {
   if (hasActiveLiveMessage()) return;
-  await sendHTML(`⚠️ <b>Warning</b>: ${pair} is approaching range boundary — monitoring closely`);
+  const boundaryStr = boundaryPct != null ? `${Math.round(boundaryPct)}% from boundary` : "Approaching boundary";
+  await sendHTML(
+`╔═══════════════════════╗
+║   ⚠️ RANGE WARNING    ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+📍 Status   ${boundaryStr}
+👁️ Monitoring closely...
+${SEP}`
+  );
 }
 
-export async function notifyBtcDowntrend({ change4h }) {
+export async function notifyBtcDowntrend({ change4h, openPositions = null }) {
   const pct = typeof change4h === "number" ? change4h.toFixed(1) : "?";
-  await sendHTML(`🚨 <b>BTC Alert</b>: Market in downtrend (${pct}% 4h) — new entries suspended, monitoring open positions closely`);
+  const posStr = openPositions != null
+    ? `\n📂 Open    ${openPositions} position${openPositions !== 1 ? "s" : ""} monitored`
+    : "";
+  await sendHTML(
+`╔═══════════════════════╗
+║   🚨 SAFETY ALERT     ║
+╚═══════════════════════╝
+⚡ Type    BTC Downtrend
+📉 BTC     ${pct}% in 4h
+🛡️ Action  Entries suspended${posStr}
+${SEP}`
+  );
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
-    `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+`🔄 <b>Auto-Swap</b>
+${escHtml(inputSymbol ?? "?")} → ${escHtml(outputSymbol ?? "?")}
+In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}
+Tx: <code>${tx?.slice(0, 16) ?? "?"}...</code>`
   );
 }
 
 export async function notifyOutOfRange({ pair, minutesOOR }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `⚠️ <b>Out of Range</b> ${pair}\n` +
-    `Been OOR for ${minutesOOR} minutes`
+`⚠️ <b>Out of Range</b>: ${escHtml(pair)}
+Been OOR for ${fmtAge(minutesOOR)}`
   );
+}
+
+// ─── Structured cycle formatters (called from index.js) ──────────
+
+export function buildManagementCycleHtml({ positionData = [], actionMap = new Map(), noAction = false }) {
+  const timeStr = fmtUtcTime();
+  const headerLine = noAction ? `⏰ ${timeStr} — All Clear ✅` : `⏰ ${timeStr}`;
+
+  const posBlocks = positionData.map(p => {
+    const act = (actionMap instanceof Map ? actionMap.get(p.position) : null) ?? { action: "STAY" };
+    const decision = (() => {
+      if (act.action === "STAY") return "STAY";
+      if (act.action === "CLAIM") return "CLAIM FEES";
+      if (act.action === "CLOSE") return `CLOSE${act.reason ? ` — ${String(act.reason).replace(/\[SAFETY\]\s*/i, "").slice(0, 28)}` : ""}`;
+      if (act.action === "INSTRUCTION") return "EVAL (instruction)";
+      return act.action;
+    })();
+    const statusLabel = p.in_range ? "🟢 IN RANGE" : `🔴 OOR ${fmtAge(p.minutes_out_of_range)}`;
+    const pnl = Number(p.pnl_pct) || 0;
+    const pnlLine = `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}% ${pnl >= 0 ? "✅" : "🔴"}`;
+    const yieldStr = p.fee_per_tvl_24h != null ? `${Number(p.fee_per_tvl_24h).toFixed(2)}% APR` : "—";
+    return [
+      `🪙 ${escHtml(p.pair)}`,
+      `├ 💵 Value      $${Number(p.total_value_usd || 0).toFixed(2)}`,
+      `├ 💎 Unclaimed  $${Number(p.unclaimed_fees_usd || 0).toFixed(2)}`,
+      `├ 📈 PnL        ${pnlLine}`,
+      `├ 🌾 Yield      ${yieldStr}`,
+      `├ ⏱️ Age        ${fmtAge(p.age_minutes)}`,
+      `├ 📍 Status     ${statusLabel}`,
+      `└ 👉 Decision   ${escHtml(decision)}`,
+    ].join("\n");
+  });
+
+  const totalValue = positionData.reduce((s, p) => s + (Number(p.total_value_usd) || 0), 0);
+  const totalFees  = positionData.reduce((s, p) => s + (Number(p.unclaimed_fees_usd) || 0), 0);
+  const avgPnl = positionData.length > 0
+    ? positionData.reduce((s, p) => s + (Number(p.pnl_pct) || 0), 0) / positionData.length
+    : 0;
+
+  const summaryLines = noAction
+    ? [
+        "━━━ 💼 PORTFOLIO ━━━",
+        `💵 Total Value  $${totalValue.toFixed(2)}`,
+        `💎 Total Fees   $${totalFees.toFixed(2)}`,
+        `📈 Combined PnL ${avgPnl >= 0 ? "+" : ""}${avgPnl.toFixed(2)}%`,
+      ]
+    : [
+        "━━━ 📊 SUMMARY ━━━",
+        `📂 Positions    ${positionData.length} open`,
+        `💵 Total Value  $${totalValue.toFixed(2)}`,
+        `💎 Total Fees   $${totalFees.toFixed(2)}`,
+        `⚡ Action       ${positionData.some(p => (actionMap instanceof Map ? actionMap.get(p.position)?.action : null) !== "STAY") ? "Actions taken" : "No changes"}`,
+      ];
+
+  return [
+    "╔═══════════════════════╗",
+    "║  🔄 MANAGEMENT CYCLE  ║",
+    "╚═══════════════════════╝",
+    headerLine,
+    "",
+    noAction ? "━━━ 📂 POSITIONS ━━━" : "━━━ 📂 OPEN POSITIONS ━━━",
+    ...posBlocks.flatMap((b, i) => i === 0 ? [b] : ["", b]),
+    "",
+    ...summaryLines,
+    SEP,
+  ].join("\n");
+}
+
+export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletSol = null, deployAmount = null }) {
+  const timeStr = fmtUtcTime();
+  const btcLabel = btcCheck?.downtrend
+    ? `⚠️  ${btcCheck.btc_change_4h != null ? btcCheck.btc_change_4h.toFixed(1) + "% 4h" : "Downtrend"}`
+    : "✅ Neutral";
+  const parts = [
+    "╔═══════════════════════╗",
+    "║   🔍 SCREENING CYCLE  ║",
+    "╚═══════════════════════╝",
+    `⏰ ${timeStr}`,
+    "",
+    `${btcCheck?.downtrend ? "⚠️" : "✅"} BTC Trend    ${btcLabel}`,
+    walletSol  != null ? `✅ Wallet       ${Number(walletSol).toFixed(3)} SOL`  : null,
+    deployAmount != null ? `📊 Deploy       ${deployAmount} SOL`                : null,
+    "",
+    content || "No report",
+    SEP,
+  ].filter(v => v !== null);
+  return parts.join("\n");
 }
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-function fmtPct(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }
