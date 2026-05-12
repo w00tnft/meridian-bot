@@ -728,8 +728,10 @@ STEPS:
 3. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
+   Always pass deploy_position.score = your score for this pool (out of 5.0).
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
+   HIGH CONVICTION OVERRIDE: If a pool is younger than 72h but scores >= 4.5/5, has organic >= 85%, fee/tvl >= 0.8, and you believe it is exceptional, you may attempt to deploy up to 0.25 SOL. Set amount_y = 0.25 (or less). The safety layer will enforce all five conditions — if any fail, the deploy will be blocked automatically. If you are using this override, include "HIGH CONVICTION" in your decision report.
 4. Report your decision using EXACTLY this format — no markdown bold, no paragraphs, no extra sections:
 
    If deploying:
@@ -995,8 +997,9 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+  const effectiveStopLoss = tracked?.stopLossPct ?? managementConfig.stopLossPct;
+  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= effectiveStopLoss) {
+    return { action: "CLOSE", rule: 1, reason: tracked?.highConviction ? `stop loss (HC -10%)` : "stop loss" };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
@@ -1023,9 +1026,11 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
-  // Max position age: close after 5 days to avoid silent IL accumulation
-  if ((position.age_minutes ?? 0) >= 5 * 24 * 60) {
-    return { action: "CLOSE", rule: 6, reason: "max age reached (5 days)" };
+  // Max position age: HC positions close after 2 days; normal positions after 5 days
+  const effectiveMaxAgeMinutes = tracked?.maxAgeMinutes ?? (5 * 24 * 60);
+  const effectiveMaxAgeDays = Math.round(effectiveMaxAgeMinutes / (24 * 60));
+  if ((position.age_minutes ?? 0) >= effectiveMaxAgeMinutes) {
+    return { action: "CLOSE", rule: 6, reason: `max age reached (${effectiveMaxAgeDays} day${effectiveMaxAgeDays !== 1 ? "s" : ""})` };
   }
   return null;
 }

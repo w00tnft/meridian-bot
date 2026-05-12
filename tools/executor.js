@@ -13,7 +13,7 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction, recordClosedToken, isTokenOnCooldown } from "../state.js";
+import { setPositionInstruction, recordClosedToken, isTokenOnCooldown, setPositionHighConvictionFlags } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -43,7 +43,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, notifyHighConviction } from "../telegram.js";
 
 function numberOrNull(value) {
   const n = Number(value);
@@ -136,13 +136,44 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  // Strategy 2: pool/token age must be at least 72 hours
+  // Strategy 2: pool/token age must be at least 72 hours (HC override allowed under strict conditions)
   const tokenAgeHours = poolDetailTokenCreatedAt(detail);
   const MIN_POOL_AGE_HOURS = 72;
   if (tokenAgeHours != null && tokenAgeHours < MIN_POOL_AGE_HOURS) {
+    // High Conviction Override: ALL five conditions must pass simultaneously
+    const HC_MIN_AGE_HOURS    = 24;
+    const HC_MIN_ORGANIC      = 85;
+    const HC_MIN_FEE_TVL      = 0.8;
+    const HC_MIN_SCORE        = 4.5;
+    const HC_MAX_AMOUNT_SOL   = 0.25;
+
+    const organicScore  = numberOrNull(detail?.organic_score ?? args.organic_score);
+    const feeTvlRatio   = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
+    const score         = numberOrNull(args.score);
+    const amountSol     = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
+
+    const ageOk     = tokenAgeHours >= HC_MIN_AGE_HOURS;
+    const organicOk = organicScore != null && organicScore >= HC_MIN_ORGANIC;
+    const feeTvlOk  = feeTvlRatio  != null && feeTvlRatio  >= HC_MIN_FEE_TVL;
+    const scoreOk   = score        != null && score         >= HC_MIN_SCORE;
+    const amountOk  = amountSol    != null && amountSol     <= HC_MAX_AMOUNT_SOL;
+
+    if (ageOk && organicOk && feeTvlOk && scoreOk && amountOk) {
+      log("executor", `[SAFETY] High conviction override: ${args.pool_address} — age ${tokenAgeHours}h, score ${score}/5, organic ${organicScore}%, fee/tvl ${feeTvlRatio?.toFixed(2)} — deploying ${amountSol} SOL (reduced size)`);
+      return { pass: true, highConviction: true, tokenAgeHours, organicScore, feeTvlRatio, score, amountSol };
+    }
+
+    const failReasons = [
+      !ageOk     && `age ${tokenAgeHours}h < ${HC_MIN_AGE_HOURS}h`,
+      !organicOk && `organic ${organicScore ?? "unknown"}% < ${HC_MIN_ORGANIC}%`,
+      !feeTvlOk  && `fee/tvl ${feeTvlRatio ?? "unknown"} < ${HC_MIN_FEE_TVL}`,
+      !scoreOk   && `score ${score ?? "not provided"} < ${HC_MIN_SCORE}`,
+      !amountOk  && `amount ${amountSol} SOL > ${HC_MAX_AMOUNT_SOL} SOL cap`,
+    ].filter(Boolean).join(", ");
+
     return {
       pass: false,
-      reason: `[SAFETY] Pool age block: ${args.pool_address} is only ${tokenAgeHours} hours old — minimum ${MIN_POOL_AGE_HOURS} hours required`,
+      reason: `[SAFETY] Pool age block: ${args.pool_address} is only ${tokenAgeHours}h old (min ${MIN_POOL_AGE_HOURS}h). HC override failed: ${failReasons}`,
     };
   }
 
@@ -588,8 +619,9 @@ export async function executeTool(name, args) {
   }
 
   // ─── Pre-execution safety checks ──────────
+  let safetyCheck = null;
   if (PROTECTED_TOOLS.has(name)) {
-    const safetyCheck = await runSafetyChecks(name, args);
+    safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
       return {
@@ -618,6 +650,12 @@ export async function executeTool(name, args) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        if (safetyCheck?.highConviction && result.position) {
+          const HC_SL_PCT = -10;
+          const HC_MAX_AGE_MINUTES = 2 * 24 * 60; // 2 days
+          setPositionHighConvictionFlags(result.position, { stopLossPct: HC_SL_PCT, maxAgeMinutes: HC_MAX_AGE_MINUTES });
+          notifyHighConviction({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), ageHours: safetyCheck.tokenAgeHours, score: safetyCheck.score, organic: safetyCheck.organicScore, feeTvlRatio: safetyCheck.feeTvlRatio, amountSol: args.amount_y ?? args.amount_sol ?? 0 }).catch(() => {});
+        }
       } else if (name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0, feesUsd: result.fees_usd ?? null, reason: args.reason ?? null, heldMinutes: result.minutes_held ?? null }).catch(() => {});
         if (result.base_mint) recordClosedToken(result.base_mint, args.reason ?? null);
