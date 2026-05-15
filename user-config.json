@@ -7,6 +7,5 @@
   "maxBinStep": 200,
   "maxTvl": 400000,
   "minHolders": 250,
-  "minMcap": 100000,
-  "minFeeActiveTvlRatio": 0.05
+  "minMcap": 100000
 }

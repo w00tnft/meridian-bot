@@ -513,6 +513,23 @@ export function setLastBriefingDate() {
 }
 
 /**
+ * Number of closed positions at the last threshold evolution run (0 if never run).
+ */
+export function getLastEvolutionAt() {
+  const state = load();
+  return state.lastEvolutionAt ?? 0;
+}
+
+/**
+ * Record the closed-position count at which threshold evolution last ran.
+ */
+export function setLastEvolutionAt(n) {
+  const state = load();
+  state.lastEvolutionAt = n;
+  save(state);
+}
+
+/**
  * Reconcile local state with actual on-chain positions.
  * Marks any local open positions as closed if they are not in the on-chain list.
  */

@@ -2137,21 +2137,39 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
     if (input === "/evolve") {
       await runBusy(async () => {
         const perf = getPerformanceSummary();
-        if (!perf || perf.total_positions_closed < 5) {
-          const needed = 5 - (perf?.total_positions_closed || 0);
-          console.log(`\nNeed at least 5 closed positions to evolve. ${needed} more needed.\n`);
+        const MIN_EVOLVE = 25;
+        if (!perf || perf.total_positions_closed < MIN_EVOLVE) {
+          const needed = MIN_EVOLVE - (perf?.total_positions_closed || 0);
+          console.log(`\nNeed at least ${MIN_EVOLVE} closed positions to evolve. ${needed} more needed.\n`);
           return;
         }
         const fs = await import("fs");
         const lessonsData = JSON.parse(fs.default.readFileSync("./lessons.json", "utf8"));
         const result = evolveThresholds(lessonsData.performance, config);
-        if (!result || Object.keys(result.changes).length === 0) {
-          console.log("\nNo threshold changes needed — current settings already match performance data.\n");
+        if (!result) {
+          console.log("\nEvolution returned no result — check logs.\n");
+        } else if (Object.keys(result.changes).length === 0) {
+          const skippedKeys = Object.keys(result.skipped ?? {});
+          if (skippedKeys.length > 0) {
+            console.log("\nNo changes — thresholds skipped:");
+            for (const key of skippedKeys) console.log(`  ${key}: ${result.skipped[key]}`);
+          } else {
+            console.log("\nNo threshold changes needed — current settings already match performance data.");
+          }
+          console.log();
         } else {
           reloadScreeningThresholds();
           console.log("\nThresholds evolved:");
-          for (const [key, val] of Object.entries(result.changes)) {
-            console.log(`  ${key}: ${result.rationale[key]}`);
+          for (const [key] of Object.entries(result.changes)) {
+            const r = result.rationale[key];
+            const arrow = r.to > r.from ? "↑" : "↓";
+            console.log(`  ${key}: ${r.from} → ${r.to} ${arrow} (+${r.nudgePct}%) — ${r.detail}`);
+          }
+          if (Object.keys(result.skipped ?? {}).length > 0) {
+            console.log("Skipped:");
+            for (const [key, reason] of Object.entries(result.skipped)) {
+              console.log(`  ${key}: ${reason}`);
+            }
           }
           console.log("\nSaved to user-config.json. Applied immediately.\n");
         }
