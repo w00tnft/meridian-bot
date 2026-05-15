@@ -91,6 +91,22 @@ import { getStateSummary } from "./state.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 import { getDecisionSummary } from "./decision-log.js";
 
+// ─── Per-cycle deploy guard ───────────────────────────────────────────────────
+// Tracks whether deploy_position succeeded in the CURRENT screening cycle.
+// Scoped to a cycle, not a process session — reset by index.js at the start
+// of every runScreeningCycle() call via resetCycleDeployGuard().
+// This prevents same-cycle double-deploys while allowing fresh attempts
+// in the next cycle even if the previous cycle's deploy failed or was blocked.
+let _cycleDeploySucceeded = false;
+
+export function resetCycleDeployGuard() {
+  _cycleDeploySucceeded = false;
+}
+
+export function isCycleDeployBlocked() {
+  return _cycleDeploySucceeded;
+}
+
 // Supports OpenRouter (default) or any OpenAI-compatible local server (e.g. LM Studio)
 // To use LM Studio: set LLM_BASE_URL=http://localhost:1234/v1 and LLM_API_KEY=lm-studio in .env
 const client = new OpenAI({
@@ -171,11 +187,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   let messages = buildMessages(systemPrompt, sessionHistory, goal, providerMode);
 
   // Track write tools fired this session — prevent the model from calling the same
-  // destructive tool twice (e.g. deploy twice, swap twice after auto-swap)
-  const ONCE_PER_SESSION = new Set(["deploy_position", "swap_token", "close_position"]);
-  // deploy_position: locked after success only — failed deploys can be retried once.
-  // The executor's duplicate-pool safety check (force-fresh getMyPositions) prevents
-  // double on-chain deploys even if the LLM retries a deploy that silently succeeded.
+  // destructive tool twice (e.g. close twice, swap twice after auto-swap).
+  // deploy_position is handled by the module-level _cycleDeploySucceeded flag
+  // (reset per screening cycle) rather than this local set, so failed deploys
+  // never bleed across cycles.
+  const ONCE_PER_SESSION = new Set(["swap_token", "close_position"]);
   const firedOnce = new Set();
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
@@ -339,13 +355,30 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           }
         }
 
-        // Block once-per-session tools from firing a second time
-        if (ONCE_PER_SESSION.has(functionName) && firedOnce.has(functionName)) {
-          log("agent", `Blocked duplicate ${functionName} call — already executed this session`);
+        // Block deploy_position if it already succeeded this cycle (cycle-scoped guard).
+        if (functionName === "deploy_position" && _cycleDeploySucceeded) {
+          log("agent", "Blocked duplicate deploy_position — already deployed successfully this cycle");
           await onToolFinish?.({
             name: functionName,
             args: functionArgs,
-            result: { blocked: true, reason: `${functionName} already attempted this session — do not retry. If it failed, report the error and stop.` },
+            result: { blocked: true, reason: "deploy_position already succeeded this screening cycle — will be available again next cycle." },
+            success: false,
+            step,
+          });
+          return {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ blocked: true, reason: "deploy_position already succeeded this screening cycle — will be available again next cycle." }),
+          };
+        }
+
+        // Block once-per-cycle tools (close/swap) from firing a second time within one cycle
+        if (ONCE_PER_SESSION.has(functionName) && firedOnce.has(functionName)) {
+          log("agent", `Blocked duplicate ${functionName} call — already executed this cycle`);
+          await onToolFinish?.({
+            name: functionName,
+            args: functionArgs,
+            result: { blocked: true, reason: `${functionName} already attempted this cycle — do not retry. If it failed, report the error and stop.` },
             success: false,
             step,
           });
@@ -366,8 +399,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           step,
         });
 
-        // Lock once-per-session tools only after a confirmed success.
-        // deploy_position is treated the same as close/swap: a failed attempt can be retried once.
+        // Lock deploy_position at the cycle level on success — prevents double-deploy within same cycle.
+        if (functionName === "deploy_position" && result?.success === true && !result?.error && !result?.blocked) {
+          _cycleDeploySucceeded = true;
+        }
+        // Lock close/swap within the cycle on success.
         if (ONCE_PER_SESSION.has(functionName) && result?.success === true && !result?.error && !result?.blocked) {
           firedOnce.add(functionName);
         }

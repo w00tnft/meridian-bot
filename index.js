@@ -3,7 +3,7 @@ import cron from "node-cron";
 import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
-import { agentLoop } from "./agent.js";
+import { agentLoop, resetCycleDeployGuard } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
@@ -485,6 +485,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   }
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
   _screeningLastTriggered = Date.now();
+  resetCycleDeployGuard(); // clear any deploy lock from the previous cycle
 
   // Hard guards — don't even run the agent if preconditions aren't met
   let prePositions, preBalance;
