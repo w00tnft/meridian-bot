@@ -551,6 +551,25 @@ Been OOR for ${fmtAge(minutesOOR)}`
   );
 }
 
+export async function notifyHighConviction({ pair, ageHours, score, organic, feeTvlRatio, amountSol }) {
+  if (hasActiveLiveMessage()) return;
+  const now = new Date();
+  await sendHTML(
+`╔═══════════════════════╗
+║  ⚡ HIGH CONVICTION   ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+⏱️ Age       ${ageHours != null ? ageHours.toFixed(1) + "h" : "?"}
+⭐ Score     ${score != null ? score.toFixed(1) + "/5" : "?"}
+🌿 Organic   ${organic != null ? organic + "%" : "?"}
+💹 Fee/TVL   ${feeTvlRatio != null ? feeTvlRatio.toFixed(2) : "?"}
+💵 Amount    ${amountSol} SOL (capped — new pool)
+🛡️ SL        -10% | Max 2 days
+⏰ ${fmtUtcDate(now)} ${fmtUtcTime(now)}
+${SEP}`
+  );
+}
+
 // ─── Structured cycle formatters (called from index.js) ──────────
 
 export function buildManagementCycleHtml({ positionData = [], actionMap = new Map(), noAction = false }) {
@@ -622,6 +641,8 @@ export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletS
   const btcLabel = btcCheck?.downtrend
     ? `⚠️  ${btcCheck.btc_change_4h != null ? btcCheck.btc_change_4h.toFixed(1) + "% 4h" : "Downtrend"}`
     : "✅ Neutral";
+  const isHighConviction = /HIGH CONVICTION/i.test(content);
+  const analysisHeader = isHighConviction ? "━━━ ⚡ AI ANALYSIS ━━━" : "━━━ 🤖 AI ANALYSIS ━━━";
   const parts = [
     "╔═══════════════════════╗",
     "║   🔍 SCREENING CYCLE  ║",
@@ -632,7 +653,7 @@ export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletS
     walletSol  != null ? `✅ Wallet       ${Number(walletSol).toFixed(3)} SOL`  : null,
     deployAmount != null ? `📊 Deploy       ${deployAmount} SOL`                : null,
     "",
-    "━━━ 🤖 AI ANALYSIS ━━━",
+    analysisHeader,
     content || "No report",
     SEP,
   ].filter(v => v !== null);

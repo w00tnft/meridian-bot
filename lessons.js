@@ -16,9 +16,21 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
 
 const LESSONS_FILE = "./lessons.json";
-const MIN_EVOLVE_POSITIONS = 5;   // don't evolve until we have real data
-const MAX_CHANGE_PER_STEP  = 0.20; // never shift a threshold more than 20% at once
+const MIN_EVOLVE_POSITIONS    = 25;   // minimum total closed positions before any evolution
+const MIN_PER_THRESHOLD_SAMPLES = 8; // minimum positions with data for a specific threshold
+const EVOLVE_EVERY_N          = 10;  // run evolution every N new closed positions
+const MAX_CHANGE_PER_STEP     = 0.10; // max ±10% of current value per evolution cycle
+const CONFIDENCE_THRESHOLD    = 0.65; // 65% of relevant losses/wins must support the change
 const MAX_MANUAL_LESSON_LENGTH = 400;
+
+// Hard boundaries — thresholds can never exceed these limits regardless of data
+const HARD_BOUNDS = {
+  minFeeActiveTvlRatio: [0.03, 0.08],
+  minOrganic:           [55,   80],
+  minTvl:               [8000, 50_000],
+  minHolders:           [150,  600],
+  minMcap:              [75_000, 500_000],
+};
 
 function sanitizeLessonText(text, maxLen = MAX_MANUAL_LESSON_LENGTH) {
   if (text == null) return null;
@@ -152,21 +164,28 @@ export async function recordPerformance(perf) {
     });
   }
 
-  // Evolve thresholds every 5 closed positions
-  if (data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
-    const { config, reloadScreeningThresholds } = await import("./config.js");
-    const result = evolveThresholds(data.performance, config);
-    if (result?.changes && Object.keys(result.changes).length > 0) {
-      reloadScreeningThresholds();
-      log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
-    }
+  // Evolve thresholds every EVOLVE_EVERY_N closed positions once MIN_EVOLVE_POSITIONS is reached
+  const newCount = data.performance.length;
+  if (newCount >= MIN_EVOLVE_POSITIONS) {
+    const { getLastEvolutionAt, setLastEvolutionAt } = await import("./state.js");
+    const lastAt = getLastEvolutionAt();
+    if (newCount - lastAt >= EVOLVE_EVERY_N) {
+      const { config, reloadScreeningThresholds } = await import("./config.js");
+      const result = evolveThresholds(data.performance, config);
+      setLastEvolutionAt(newCount);
+      if (result?.changes && Object.keys(result.changes).length > 0) {
+        reloadScreeningThresholds();
+        log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
+      }
+      if (result) await sendEvolutionNotification(result, newCount);
 
-    // Darwinian signal weight recalculation
-    if (config.darwin?.enabled) {
-      const { recalculateWeights } = await import("./signal-weights.js");
-      const wResult = recalculateWeights(data.performance, config);
-      if (wResult.changes.length > 0) {
-        log("evolve", `Darwin: adjusted ${wResult.changes.length} signal weight(s)`);
+      // Darwinian signal weight recalculation
+      if (config.darwin?.enabled) {
+        const { recalculateWeights } = await import("./signal-weights.js");
+        const wResult = recalculateWeights(data.performance, config);
+        if (wResult.changes.length > 0) {
+          log("evolve", `Darwin: adjusted ${wResult.changes.length} signal weight(s)`);
+        }
       }
     }
   }
@@ -279,118 +298,213 @@ function derivLesson(perf) {
  * Analyze closed position performance and evolve screening thresholds.
  * Writes changes to user-config.json and returns a summary.
  *
+ * Guards:
+ *  - Minimum 25 total closed positions
+ *  - Minimum 8 per-threshold data samples
+ *  - Max ±10% per cycle (MAX_CHANGE_PER_STEP)
+ *  - Hard bounds per threshold (HARD_BOUNDS)
+ *  - 65% direction confidence before any change
+ *
  * @param {Array}  perfData - Array of performance records (from lessons.json)
  * @param {Object} config   - Live config object (mutated in place)
- * @returns {{ changes: Object, rationale: Object } | null}
+ * @returns {{ changes: Object, rationale: Object, skipped: Object } | null}
  */
 export function evolveThresholds(perfData, config) {
-  if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) return null;
+  if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) {
+    const count = perfData?.length ?? 0;
+    log("learn", `[LEARN] Skipping evolution — insufficient data (${count}/${MIN_EVOLVE_POSITIONS} positions closed)`);
+    return null;
+  }
 
   const winners = perfData.filter((p) => p.pnl_pct > 0);
   const losers  = perfData.filter((p) => p.pnl_pct < -5);
 
-  // Need at least some signal in both directions before adjusting
   const hasSignal = winners.length >= 2 || losers.length >= 2;
   if (!hasSignal) return null;
 
   const changes   = {};
   const rationale = {};
+  const skipped   = {};
 
   // ── 1. minFeeActiveTvlRatio ───────────────────────────────────
-  // Raise the floor if low-fee pools consistently underperform.
   {
-    const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const current    = config.screening.minFeeActiveTvlRatio;
+    const current     = config.screening.minFeeActiveTvlRatio;
+    const [lo, hi]    = HARD_BOUNDS.minFeeActiveTvlRatio;
+    const winnerFees  = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
+    const loserFees   = losers.map((p)  => p.fee_tvl_ratio).filter(isFiniteNum);
+    const allSamples  = perfData.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
 
-    if (winnerFees.length >= 2) {
-      // Minimum fee/TVL among winners — we know pools below this don't work for us
-      const minWinnerFee = Math.min(...winnerFees);
-      if (minWinnerFee > current * 1.2) {
-        const target  = minWinnerFee * 0.85; // stay slightly below min winner
-        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
-        const rounded = Number(newVal.toFixed(2));
-        if (rounded > current) {
-          changes.minFeeActiveTvlRatio = rounded;
-          rationale.minFeeActiveTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
+    if (allSamples.length < MIN_PER_THRESHOLD_SAMPLES) {
+      skipped.minFeeActiveTvlRatio = `only ${allSamples.length}/${MIN_PER_THRESHOLD_SAMPLES} required samples`;
+    } else {
+      let proposedNew = null;
+      let detail      = null;
+
+      if (winnerFees.length >= 2) {
+        const minWinnerFee = Math.min(...winnerFees);
+        if (minWinnerFee > current * 1.2) {
+          const target  = minWinnerFee * 0.85;
+          const after   = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), lo, hi);
+          const rounded = Number(after.toFixed(3));
+          if (rounded > current) {
+            proposedNew = rounded;
+            detail = `lowest winner fee_tvl=${minWinnerFee.toFixed(3)} — raised from ${current} → ${rounded}`;
+          }
         }
       }
-    }
 
-    if (loserFees.length >= 2) {
-      // If losers all had high fee/TVL, that's noise (pumps then crash) — don't raise min
-      // But if losers had low fee/TVL, raise min
-      const maxLoserFee = Math.max(...loserFees);
-      if (maxLoserFee < current * 1.5 && winnerFees.length > 0) {
-        const minWinnerFee = Math.min(...winnerFees);
-        if (minWinnerFee > maxLoserFee) {
+      if (!proposedNew && loserFees.length >= 2) {
+        const maxLoserFee  = Math.max(...loserFees);
+        const minWinnerFee = winnerFees.length > 0 ? Math.min(...winnerFees) : null;
+        if (maxLoserFee < current * 1.5 && minWinnerFee != null && minWinnerFee > maxLoserFee) {
           const target  = maxLoserFee * 1.2;
-          const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
-          const rounded = Number(newVal.toFixed(2));
-          if (rounded > current && !changes.minFeeActiveTvlRatio) {
-            changes.minFeeActiveTvlRatio = rounded;
-            rationale.minFeeActiveTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
+          const after   = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), lo, hi);
+          const rounded = Number(after.toFixed(3));
+          if (rounded > current) {
+            proposedNew = rounded;
+            detail = `losers had fee_tvl<=${maxLoserFee.toFixed(3)}, winners higher — raised from ${current} → ${rounded}`;
+          }
+        }
+      }
+
+      if (proposedNew != null) {
+        // Confidence check (UP): 65% of losers must be in the zone being tightened [current, proposedNew)
+        const losersWithData = loserFees.length;
+        if (losersWithData >= 2) {
+          const losersInZone = loserFees.filter((f) => f >= current && f < proposedNew).length;
+          const confidence   = losersInZone / losersWithData;
+          const pct          = Math.round(confidence * 100);
+          if (confidence < CONFIDENCE_THRESHOLD) {
+            log("learn", `[LEARN] Skipping minFeeActiveTvlRatio evolution — confidence too low (${pct}%)`);
+            skipped.minFeeActiveTvlRatio = `confidence ${pct}% < ${Math.round(CONFIDENCE_THRESHOLD * 100)}%`;
+            proposedNew = null;
+          }
+        }
+      }
+
+      if (proposedNew != null) {
+        const nudgePct = Math.round(((proposedNew - current) / current) * 100);
+        log("learn", `[LEARN] Evolved minFeeActiveTvlRatio: ${current} → ${proposedNew} (nudge +${nudgePct}%)`);
+        changes.minFeeActiveTvlRatio = proposedNew;
+        rationale.minFeeActiveTvlRatio = { from: current, to: proposedNew, nudgePct, detail };
+      }
+    }
+  }
+
+  // ── 2. minOrganic ─────────────────────────────────────────────
+  {
+    const current        = config.screening.minOrganic;
+    const [lo, hi]       = HARD_BOUNDS.minOrganic;
+    const winnerOrganics = winners.map((p) => p.organic_score).filter(isFiniteNum);
+    const loserOrganics  = losers.map((p)  => p.organic_score).filter(isFiniteNum);
+    const allSamples     = perfData.map((p) => p.organic_score).filter(isFiniteNum);
+
+    if (allSamples.length < MIN_PER_THRESHOLD_SAMPLES) {
+      skipped.minOrganic = `only ${allSamples.length}/${MIN_PER_THRESHOLD_SAMPLES} required samples`;
+    } else if (loserOrganics.length >= 2 && winnerOrganics.length >= 1) {
+      const avgLoser  = avg(loserOrganics);
+      const avgWinner = avg(winnerOrganics);
+
+      if (avgWinner - avgLoser >= 10) {
+        const minWinnerOrganic = Math.min(...winnerOrganics);
+        const target   = Math.max(minWinnerOrganic - 3, current);
+        const after    = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), lo, hi);
+
+        if (after > current) {
+          const losersInZone = loserOrganics.filter((s) => s >= current && s < after).length;
+          const confidence   = loserOrganics.length > 0 ? losersInZone / loserOrganics.length : 0;
+          const pct          = Math.round(confidence * 100);
+
+          if (confidence < CONFIDENCE_THRESHOLD) {
+            log("learn", `[LEARN] Skipping minOrganic evolution — confidence too low (${pct}%)`);
+            skipped.minOrganic = `confidence ${pct}% < ${Math.round(CONFIDENCE_THRESHOLD * 100)}%`;
+          } else {
+            const nudgePct = Math.round(((after - current) / current) * 100);
+            log("learn", `[LEARN] Evolved minOrganic: ${current} → ${after} (nudge +${nudgePct}%)`);
+            changes.minOrganic = after;
+            rationale.minOrganic = { from: current, to: after, nudgePct, detail: `winner avg organic ${avgWinner.toFixed(0)} vs loser avg ${avgLoser.toFixed(0)}` };
           }
         }
       }
     }
   }
 
-  // ── 3. minOrganic ─────────────────────────────────────────────
-  // Raise organic floor if low-organic tokens consistently failed.
-  {
-    const loserOrganics  = losers.map((p) => p.organic_score).filter(isFiniteNum);
-    const winnerOrganics = winners.map((p) => p.organic_score).filter(isFiniteNum);
-    const current        = config.screening.minOrganic;
+  // ── Persist changes ───────────────────────────────────────────
+  if (Object.keys(changes).length > 0) {
+    let userConfig = {};
+    if (fs.existsSync(USER_CONFIG_PATH)) {
+      try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /* ignore */ }
+    }
 
-    if (loserOrganics.length >= 2 && winnerOrganics.length >= 1) {
-      const avgLoserOrganic  = avg(loserOrganics);
-      const avgWinnerOrganic = avg(winnerOrganics);
-      // Only raise if there's a clear gap (winners consistently more organic)
-      if (avgWinnerOrganic - avgLoserOrganic >= 10) {
-        // Set floor just below worst winner
-        const minWinnerOrganic = Math.min(...winnerOrganics);
-        const target = Math.max(minWinnerOrganic - 3, current);
-        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 60, 90);
-        if (newVal > current) {
-          changes.minOrganic = newVal;
-          rationale.minOrganic = `Winner avg organic ${avgWinnerOrganic.toFixed(0)} vs loser avg ${avgLoserOrganic.toFixed(0)} — raised from ${current} → ${newVal}`;
-        }
+    Object.assign(userConfig, changes);
+    userConfig._lastEvolved = new Date().toISOString();
+    userConfig._positionsAtEvolution = perfData.length;
+    fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+
+    const s = config.screening;
+    if (changes.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
+    if (changes.minOrganic           != null) s.minOrganic           = changes.minOrganic;
+
+    const data = load();
+    data.lessons.push({
+      id: Date.now(),
+      rule: `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")}`,
+      tags: ["evolution", "config_change"],
+      outcome: "manual",
+      created_at: new Date().toISOString(),
+    });
+    save(data);
+  }
+
+  return { changes, rationale, skipped };
+}
+
+// ─── Evolution Telegram Notification ──────────────────────────
+
+async function sendEvolutionNotification(result, positionCount) {
+  try {
+    const { sendHTML } = await import("./telegram.js");
+    const SEP = "━━━━━━━━━━━━━━━━━━━━━━━";
+    const { changes, rationale, skipped } = result;
+    const changedKeys = Object.keys(changes);
+    const skippedKeys = Object.keys(skipped);
+    const nextAt = positionCount + EVOLVE_EVERY_N;
+
+    if (changedKeys.length === 0 && skippedKeys.length === 0) {
+      await sendHTML(`🧠 Learning check: ${positionCount} positions closed — all thresholds stable\nNext evolution at: ${nextAt} closed positions\n${SEP}`);
+      return;
+    }
+
+    const lines = [
+      "╔═══════════════════════╗",
+      "║  🧠 LEARNING UPDATE   ║",
+      "╚═══════════════════════╝",
+      `📊 Closed positions: ${positionCount}`,
+      `🔄 Thresholds evolved: ${changedKeys.length}`,
+    ];
+
+    if (changedKeys.length > 0) {
+      lines.push("", "Changes:");
+      for (const key of changedKeys) {
+        const r = rationale[key];
+        const arrow    = r.to > r.from ? "↑" : "↓";
+        const nudgeStr = r.nudgePct >= 0 ? `+${r.nudgePct}%` : `${r.nudgePct}%`;
+        lines.push(`• ${key}: ${r.from} → ${r.to} ${arrow} (${nudgeStr})`);
       }
     }
+
+    if (skippedKeys.length > 0) {
+      lines.push("", "Skipped (low confidence):");
+      for (const key of skippedKeys) {
+        lines.push(`• ${key} — ${skipped[key]}`);
+      }
+    }
+
+    lines.push("", `Next evolution at: ${nextAt} closed positions`, SEP);
+    await sendHTML(lines.join("\n"));
+  } catch (e) {
+    log("evolve", `Failed to send evolution notification: ${e.message}`);
   }
-
-  if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
-
-  // ── Persist changes to user-config.json ───────────────────────
-  let userConfig = {};
-  if (fs.existsSync(USER_CONFIG_PATH)) {
-    try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /* ignore */ }
-  }
-
-  Object.assign(userConfig, changes);
-  userConfig._lastEvolved = new Date().toISOString();
-  userConfig._positionsAtEvolution = perfData.length;
-
-  fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
-
-  // Apply to live config object immediately
-  const s = config.screening;
-  if (changes.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
-  if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
-
-  // Log a lesson summarizing the evolution
-  const data = load();
-  data.lessons.push({
-    id: Date.now(),
-    rule: `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
-    tags: ["evolution", "config_change"],
-    outcome: "manual",
-    created_at: new Date().toISOString(),
-  });
-  save(data);
-
-  return { changes, rationale };
 }
 
 // ─── Helpers ───────────────────────────────────────────────────

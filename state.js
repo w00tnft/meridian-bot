@@ -216,6 +216,21 @@ export function isTokenOnCooldown(mint, cooldownHours = RE_ENTRY_COOLDOWN_HOURS)
 }
 
 /**
+ * Mark a position as high conviction and store tighter SL/max-age overrides.
+ */
+export function setPositionHighConvictionFlags(position_address, { stopLossPct, maxAgeMinutes }) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  pos.highConviction = true;
+  pos.stopLossPct = stopLossPct;
+  pos.maxAgeMinutes = maxAgeMinutes;
+  save(state);
+  log("state", `Position ${position_address} flagged high conviction (SL ${stopLossPct}%, max ${maxAgeMinutes}m)`);
+  return true;
+}
+
+/**
  * Set a persistent instruction for a position (e.g. "hold until 5% profit").
  * Overwrites any previous instruction. Pass null to clear.
  */
@@ -494,6 +509,23 @@ export function getLastBriefingDate() {
 export function setLastBriefingDate() {
   const state = load();
   state._lastBriefingDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+  save(state);
+}
+
+/**
+ * Number of closed positions at the last threshold evolution run (0 if never run).
+ */
+export function getLastEvolutionAt() {
+  const state = load();
+  return state.lastEvolutionAt ?? 0;
+}
+
+/**
+ * Record the closed-position count at which threshold evolution last ran.
+ */
+export function setLastEvolutionAt(n) {
+  const state = load();
+  state.lastEvolutionAt = n;
   save(state);
 }
 

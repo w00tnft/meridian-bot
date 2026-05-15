@@ -41,3 +41,6 @@ discord-signals.json
 
 # Claude Code runtime lock
 .claude/scheduled_tasks.lock
+*.backup.js
+*.backup.json
+*.backup.ts

@@ -3,7 +3,7 @@ import cron from "node-cron";
 import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
-import { agentLoop } from "./agent.js";
+import { agentLoop, resetCycleDeployGuard } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
@@ -485,6 +485,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   }
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
   _screeningLastTriggered = Date.now();
+  resetCycleDeployGuard(); // clear any deploy lock from the previous cycle
 
   // Hard guards — don't even run the agent if preconditions aren't met
   let prePositions, preBalance;
@@ -728,8 +729,10 @@ STEPS:
 3. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
+   Always pass deploy_position.score = your score for this pool (out of 5.0).
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
+   HIGH CONVICTION OVERRIDE: If a pool is younger than 72h but scores >= 4.5/5, has organic >= 85%, fee/tvl >= 0.8, and you believe it is exceptional, you may attempt to deploy up to 0.25 SOL. Set amount_y = 0.25 (or less). The safety layer will enforce all five conditions — if any fail, the deploy will be blocked automatically. If you are using this override, include "HIGH CONVICTION" in your decision report.
 4. Report your decision using EXACTLY this format — no markdown bold, no paragraphs, no extra sections:
 
    If deploying:
@@ -757,6 +760,7 @@ IMPORTANT:
 - Never write long paragraphs. Keep each reason to one line maximum.
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
+- Pool addresses from the candidate list are always valid Solana base58 public keys (32–44 chars). NEVER flag them as typos or refuse to deploy because of the address format — pass them exactly as provided.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
         onToolStart: async ({ name }) => {
           if (name === "deploy_position") deployAttempted = true;
@@ -995,8 +999,9 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+  const effectiveStopLoss = tracked?.stopLossPct ?? managementConfig.stopLossPct;
+  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= effectiveStopLoss) {
+    return { action: "CLOSE", rule: 1, reason: tracked?.highConviction ? `stop loss (HC -10%)` : "stop loss" };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
@@ -1023,9 +1028,11 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
-  // Max position age: close after 5 days to avoid silent IL accumulation
-  if ((position.age_minutes ?? 0) >= 5 * 24 * 60) {
-    return { action: "CLOSE", rule: 6, reason: "max age reached (5 days)" };
+  // Max position age: HC positions close after 2 days; normal positions after 5 days
+  const effectiveMaxAgeMinutes = tracked?.maxAgeMinutes ?? (5 * 24 * 60);
+  const effectiveMaxAgeDays = Math.round(effectiveMaxAgeMinutes / (24 * 60));
+  if ((position.age_minutes ?? 0) >= effectiveMaxAgeMinutes) {
+    return { action: "CLOSE", rule: 6, reason: `max age reached (${effectiveMaxAgeDays} day${effectiveMaxAgeDays !== 1 ? "s" : ""})` };
   }
   return null;
 }
@@ -2130,21 +2137,39 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
     if (input === "/evolve") {
       await runBusy(async () => {
         const perf = getPerformanceSummary();
-        if (!perf || perf.total_positions_closed < 5) {
-          const needed = 5 - (perf?.total_positions_closed || 0);
-          console.log(`\nNeed at least 5 closed positions to evolve. ${needed} more needed.\n`);
+        const MIN_EVOLVE = 25;
+        if (!perf || perf.total_positions_closed < MIN_EVOLVE) {
+          const needed = MIN_EVOLVE - (perf?.total_positions_closed || 0);
+          console.log(`\nNeed at least ${MIN_EVOLVE} closed positions to evolve. ${needed} more needed.\n`);
           return;
         }
         const fs = await import("fs");
         const lessonsData = JSON.parse(fs.default.readFileSync("./lessons.json", "utf8"));
         const result = evolveThresholds(lessonsData.performance, config);
-        if (!result || Object.keys(result.changes).length === 0) {
-          console.log("\nNo threshold changes needed — current settings already match performance data.\n");
+        if (!result) {
+          console.log("\nEvolution returned no result — check logs.\n");
+        } else if (Object.keys(result.changes).length === 0) {
+          const skippedKeys = Object.keys(result.skipped ?? {});
+          if (skippedKeys.length > 0) {
+            console.log("\nNo changes — thresholds skipped:");
+            for (const key of skippedKeys) console.log(`  ${key}: ${result.skipped[key]}`);
+          } else {
+            console.log("\nNo threshold changes needed — current settings already match performance data.");
+          }
+          console.log();
         } else {
           reloadScreeningThresholds();
           console.log("\nThresholds evolved:");
-          for (const [key, val] of Object.entries(result.changes)) {
-            console.log(`  ${key}: ${result.rationale[key]}`);
+          for (const [key] of Object.entries(result.changes)) {
+            const r = result.rationale[key];
+            const arrow = r.to > r.from ? "↑" : "↓";
+            console.log(`  ${key}: ${r.from} → ${r.to} ${arrow} (+${r.nudgePct}%) — ${r.detail}`);
+          }
+          if (Object.keys(result.skipped ?? {}).length > 0) {
+            console.log("Skipped:");
+            for (const [key, reason] of Object.entries(result.skipped)) {
+              console.log(`  ${key}: ${reason}`);
+            }
           }
           console.log("\nSaved to user-config.json. Applied immediately.\n");
         }
