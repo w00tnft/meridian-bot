@@ -385,7 +385,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           return {
             role: "tool",
             tool_call_id: toolCall.id,
-            content: JSON.stringify({ blocked: true, reason: `${functionName} already attempted this session — do not retry. If it failed, report the error and stop.` }),
+            content: JSON.stringify({ blocked: true, reason: `${functionName} already attempted this cycle — do not retry. If it failed, report the error and stop.` }),
           };
         }
 

@@ -368,6 +368,17 @@ export function evolveThresholds(perfData, config) {
     try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /* ignore */ }
   }
 
+  // Do not auto-evolve keys the user has explicitly pinned in user-config.json.
+  // A pinned key is one explicitly present in the file (not just a runtime default).
+  for (const key of Object.keys(changes)) {
+    if (Object.prototype.hasOwnProperty.call(userConfig, key)) {
+      delete changes[key];
+      delete rationale[key];
+    }
+  }
+
+  if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
+
   Object.assign(userConfig, changes);
   userConfig._lastEvolved = new Date().toISOString();
   userConfig._positionsAtEvolution = perfData.length;
