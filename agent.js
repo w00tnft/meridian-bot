@@ -173,8 +173,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   // Track write tools fired this session — prevent the model from calling the same
   // destructive tool twice (e.g. deploy twice, swap twice after auto-swap)
   const ONCE_PER_SESSION = new Set(["deploy_position", "swap_token", "close_position"]);
-  // These lock after first attempt regardless of success — retrying them is always wrong
-  const NO_RETRY_TOOLS = new Set(["deploy_position"]);
+  // deploy_position: locked after success only — failed deploys can be retried once.
+  // The executor's duplicate-pool safety check (force-fresh getMyPositions) prevents
+  // double on-chain deploys even if the LLM retries a deploy that silently succeeded.
   const firedOnce = new Set();
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
@@ -365,10 +366,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           step,
         });
 
-        // Lock deploy_position after first attempt regardless of outcome — retrying is never right
-        // For close/swap: only lock on success so genuine failures can be retried
-        if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
-        else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
+        // Lock once-per-session tools only after a confirmed success.
+        // deploy_position is treated the same as close/swap: a failed attempt can be retried once.
+        if (ONCE_PER_SESSION.has(functionName) && result?.success === true && !result?.error && !result?.blocked) {
+          firedOnce.add(functionName);
+        }
 
         return {
           role: "tool",

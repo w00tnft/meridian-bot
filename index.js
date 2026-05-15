@@ -759,6 +759,7 @@ IMPORTANT:
 - Never write long paragraphs. Keep each reason to one line maximum.
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
+- Pool addresses from the candidate list are always valid Solana base58 public keys (32–44 chars). NEVER flag them as typos or refuse to deploy because of the address format — pass them exactly as provided.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
         onToolStart: async ({ name }) => {
           if (name === "deploy_position") deployAttempted = true;
