@@ -560,3 +560,63 @@ export function syncOpenPositions(active_addresses) {
 
   if (changed) save(state);
 }
+
+// ─── Failed Emergency Close Tracking ──────────────────────────
+// Persists across cycles so retry logic survives bot restarts.
+
+/**
+ * Record a failed emergency close attempt. Returns the new attempt count.
+ */
+export function recordFailedClose(position_address, pair, reason) {
+  const state = load();
+  if (!state.failedCloses) state.failedCloses = {};
+  const existing = state.failedCloses[position_address] ?? {
+    pair,
+    attempts: 0,
+    firstFailedAt: new Date().toISOString(),
+  };
+  existing.attempts += 1;
+  existing.lastAttemptAt = new Date().toISOString();
+  existing.lastReason = String(reason || "unknown").slice(0, 200);
+  existing.pair = pair || existing.pair;
+  state.failedCloses[position_address] = existing;
+  save(state);
+  return existing.attempts;
+}
+
+/**
+ * Get the failed-close record for a position, or null if none.
+ */
+export function getFailedCloseAttempts(position_address) {
+  const state = load();
+  return state.failedCloses?.[position_address] ?? null;
+}
+
+/**
+ * Clear the failed-close record after a successful close.
+ */
+export function clearFailedClose(position_address) {
+  const state = load();
+  if (state.failedCloses?.[position_address]) {
+    delete state.failedCloses[position_address];
+    save(state);
+  }
+}
+
+/**
+ * Remove failed-close entries for positions that are no longer open on-chain.
+ * Called at the start of each management cycle to avoid stale retries.
+ */
+export function pruneFailedCloses(openPositionAddresses) {
+  const state = load();
+  if (!state.failedCloses) return;
+  const open = new Set(openPositionAddresses);
+  let changed = false;
+  for (const addr of Object.keys(state.failedCloses)) {
+    if (!open.has(addr)) {
+      delete state.failedCloses[addr];
+      changed = true;
+    }
+  }
+  if (changed) save(state);
+}
