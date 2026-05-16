@@ -78,11 +78,70 @@ async function getDLMM() {
 let _connection = null;
 let _wallet = null;
 
-function getConnection() {
-  if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, "confirmed");
+// ─── RPC Fallback ─────────────────────────────────────────────
+// Public fallback RPCs tried in order when primary fails with 400/429/503.
+const PUBLIC_FALLBACK_RPCS = [
+  "https://api.mainnet-beta.solana.com",
+  "https://solana-api.projectserum.com",
+];
+
+function getRpcList() {
+  const primary = process.env.RPC_URL;
+  const envFallback = process.env.FALLBACK_RPC_URL;
+  const urls = [primary];
+  if (envFallback && envFallback !== primary) urls.push(envFallback);
+  for (const pub of PUBLIC_FALLBACK_RPCS) {
+    if (!urls.includes(pub)) urls.push(pub);
   }
-  return _connection;
+  return urls.filter(Boolean);
+}
+
+function isRpcError(err) {
+  const msg = err?.message || String(err);
+  return (
+    err?.status === 400 || err?.status === 429 || err?.status === 503 ||
+    /\b(400|429|503)\b/.test(msg) ||
+    /too many requests|rate limit|service unavailable|bad request/i.test(msg)
+  );
+}
+
+function getConnection(rpcUrl) {
+  const url = rpcUrl || process.env.RPC_URL;
+  if (!rpcUrl) {
+    if (!_connection) {
+      _connection = new Connection(url, "confirmed");
+    }
+    return _connection;
+  }
+  return new Connection(url, "confirmed");
+}
+
+// Wraps sendAndConfirmTransaction with RPC fallback.
+// For close operations, tries all available RPCs (up to 3).
+// For other operations, tries primary then first fallback only.
+async function sendWithRpcFallback(tx, signers, { isClose = false } = {}) {
+  const rpcs = getRpcList();
+  const maxAttempts = isClose ? Math.min(rpcs.length, 3) : 2;
+  let lastError;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    const conn = getConnection(rpcs[i]);
+    try {
+      return await sendAndConfirmTransaction(conn, tx, signers);
+    } catch (err) {
+      lastError = err;
+      if (i + 1 < maxAttempts && isRpcError(err)) {
+        const nextRpc = rpcs[i + 1];
+        log("rpc_warn", `[RPC] Primary failed (${err.message?.slice(0, 80)}), switching to fallback RPC: ${nextRpc}`);
+        import("../telegram.js").then(({ sendHTML }) => {
+          sendHTML(`⚠️ RPC switched to fallback — primary Helius unavailable\n<code>${nextRpc}</code>`).catch(() => {});
+        }).catch(() => {});
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 function getWallet() {
@@ -780,7 +839,7 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
+        const txHash = await sendWithRpcFallback(createTxArray[i], signers);
         txHashes.push(txHash);
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
@@ -796,7 +855,7 @@ export async function deployPosition({
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
       for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+        const txHash = await sendWithRpcFallback(addTxArray[i], [wallet]);
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
       }
@@ -810,7 +869,7 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
+      const txHash = await sendWithRpcFallback(tx, [wallet, newPosition]);
       txHashes.push(txHash);
     }
 
@@ -1390,7 +1449,7 @@ export async function claimFees({ position_address }) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+      const txHash = await sendWithRpcFallback(tx, [wallet]);
       txHashes.push(txHash);
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
@@ -1663,7 +1722,7 @@ export async function closePosition({ position_address, reason }) {
         });
         if (claimTxs && claimTxs.length > 0) {
           for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+            const claimHash = await sendWithRpcFallback(tx, [wallet], { isClose: true });
             claimTxHashes.push(claimHash);
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
@@ -1702,7 +1761,7 @@ export async function closePosition({ position_address, reason }) {
       });
 
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+        const txHash = await sendWithRpcFallback(tx, [wallet], { isClose: true });
         closeTxHashes.push(txHash);
       }
     } else {
@@ -1711,7 +1770,7 @@ export async function closePosition({ position_address, reason }) {
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
+      const txHash = await sendWithRpcFallback(closeTx, [wallet], { isClose: true });
       closeTxHashes.push(txHash);
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];
