@@ -532,6 +532,31 @@ ${SEP}`
   );
 }
 
+export async function notifyCloseFailed({ pair, attempts, reason }) {
+  await sendHTML(
+`╔═══════════════════════╗
+║  🚨 CLOSE FAILED      ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+⚠️ Attempts ${attempts}
+❌ Error    ${escHtml(String(reason || "unknown").slice(0, 80))}
+🔄 Will retry next cycle
+${SEP}`
+  );
+}
+
+export async function notifyCloseUrgent({ pair, attempts }) {
+  await sendHTML(
+`╔═══════════════════════╗
+║ 🚨 URGENT: CLOSE FAIL ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+❌ Failed   ${attempts}x — still open!
+👤 Action   Close manually on Meteora
+${SEP}`
+  );
+}
+
 export async function notifyBtcDowntrend({ change4h, openPositions = null }) {
   const pct = typeof change4h === "number" ? change4h.toFixed(1) : "?";
   const posStr = openPositions != null

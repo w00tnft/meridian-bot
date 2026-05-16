@@ -23,13 +23,15 @@ import {
   notifyOutOfRange,
   notifyOorApproaching,
   notifyBtcDowntrend,
+  notifyCloseFailed,
+  notifyCloseUrgent,
   isEnabled as telegramEnabled,
   createLiveMessage,
   buildManagementCycleHtml,
   buildScreeningCycleHtml,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFailedClose, getFailedCloseAttempts, clearFailedClose, pruneFailedCloses } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkPriceVelocity, checkBtcTrend } from "./tools/okx.js";
@@ -247,6 +249,9 @@ export async function runManagementCycle({ silent = false } = {}) {
       return { ...p, recall: recallForPool(p.pool) };
     });
 
+    // Clean up failedCloses entries for positions that no longer exist
+    pruneFailedCloses(positionData.map((p) => p.position));
+
     // Price velocity emergency circuit breaker — runs before any LLM or rule check
     const velocityCloseSet = new Set();
     await Promise.allSettled(positionData.map(async (p) => {
@@ -273,6 +278,16 @@ export async function runManagementCycle({ silent = false } = {}) {
           btcCloseSet.add(p.position);
           log("safety", `[SAFETY] BTC tightening: closing ${p.pair} — organic ${trackedOrganic} < 80 and PnL ${pnl}% < -5%`);
         }
+      }
+    }
+
+    // Pending retry closes — positions that failed emergency close in a previous cycle
+    const pendingRetryCloseSet = new Set();
+    for (const p of positionData) {
+      if (velocityCloseSet.has(p.position) || btcCloseSet.has(p.position)) continue;
+      if (getFailedCloseAttempts(p.position)) {
+        pendingRetryCloseSet.add(p.position);
+        log("safety", `[SAFETY] Retry close queued for ${p.pair} (previous attempt failed)`);
       }
     }
 
@@ -335,6 +350,12 @@ export async function runManagementCycle({ silent = false } = {}) {
         actionMap.set(p.position, { action: "CLOSE", rule: "btc_downtrend", reason: `[SAFETY] BTC downtrend — closing weak position (organic < 80, PnL < -5%)` });
         continue;
       }
+      // Retry a previously-failed emergency close
+      if (pendingRetryCloseSet.has(p.position)) {
+        const rec = getFailedCloseAttempts(p.position);
+        actionMap.set(p.position, { action: "CLOSE", rule: "emergency_retry", reason: `[SAFETY] Retry emergency close (attempt ${(rec?.attempts ?? 0) + 1})` });
+        continue;
+      }
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
         actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
@@ -357,6 +378,40 @@ export async function runManagementCycle({ silent = false } = {}) {
         continue;
       }
       actionMap.set(p.position, { action: "STAY" });
+    }
+
+    // ── Direct emergency close (bypass LLM for velocity/BTC/retry) ──
+    const EMERGENCY_CLOSE_MAX_ATTEMPTS = 3;
+    const emergencyRules = new Set(["velocity", "btc_downtrend", "emergency_retry"]);
+    for (const p of positionData) {
+      const act = actionMap.get(p.position);
+      if (!act || !emergencyRules.has(act.rule)) continue;
+      log("safety", `[SAFETY] Executing direct emergency close: ${p.pair} — ${act.reason}`);
+      let closeResult;
+      try {
+        closeResult = await executeTool("close_position", { position_address: p.position, reason: act.reason });
+      } catch (e) {
+        closeResult = { success: false, error: e.message };
+      }
+      if (closeResult?.dry_run) {
+        actionMap.set(p.position, { action: "STAY", reason: "emergency close (dry run)" });
+        continue;
+      }
+      const succeeded = closeResult?.success === true && !closeResult?.error && !closeResult?.blocked;
+      if (succeeded) {
+        clearFailedClose(p.position);
+        actionMap.set(p.position, { action: "STAY", reason: "emergency close succeeded" });
+        log("safety", `[SAFETY] Emergency close succeeded for ${p.pair}`);
+      } else {
+        const failReason = closeResult?.error || "close failed or position still open";
+        const attempts = recordFailedClose(p.position, p.pair, failReason);
+        log("cron_error", `[ERROR] Emergency close FAILED for ${p.pair} (attempt ${attempts}): ${failReason}`);
+        if (attempts >= EMERGENCY_CLOSE_MAX_ATTEMPTS) {
+          notifyCloseUrgent({ pair: p.pair, attempts }).catch(() => {});
+        } else {
+          notifyCloseFailed({ pair: p.pair, attempts, reason: failReason }).catch(() => {});
+        }
+      }
     }
 
     // ── Build JS report ──────────────────────────────────────────────
