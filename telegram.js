@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { log } from "./logger.js";
+import { getCachedSolPrice } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
@@ -34,11 +35,23 @@ function fmtUtcDate(d = new Date()) {
   });
 }
 
-function fmtPnl(pnlUsd, pnlPct) {
-  const u = Number(pnlUsd) || 0;
-  const p = Number(pnlPct) || 0;
-  const sign = u >= 0 ? "+" : "";
-  return `${sign}$${Math.abs(u).toFixed(2)} (${sign}${Math.abs(p).toFixed(1)}%)`;
+// Convert a USD amount to SOL using the cached live price
+function usdToSol(usd) {
+  const price = getCachedSolPrice();
+  return price > 0 ? (Number(usd) || 0) / price : 0;
+}
+
+// Format a SOL amount with 4 decimal places
+function fmtSol(sol) {
+  return `${(Number(sol) || 0).toFixed(4)} SOL`;
+}
+
+// Format signed SOL PnL with percentage context: "+0.0072 SOL (+2.56%)"
+function fmtSolPnl(sol, pct) {
+  const s = Number(sol) || 0;
+  const p = Number(pct) || 0;
+  const sign = s >= 0 ? "+" : "-";
+  return `${sign}${Math.abs(s).toFixed(4)} SOL (${p >= 0 ? "+" : ""}${p.toFixed(2)}%)`;
 }
 const ALLOWED_USER_IDS = new Set(
   String(process.env.TELEGRAM_ALLOWED_USER_IDS || "")
@@ -453,10 +466,12 @@ ${SEP}`
 export async function notifyClose({ pair, pnlUsd, pnlPct, feesUsd = null, reason = null, heldMinutes = null }) {
   if (hasActiveLiveMessage()) return;
   const r = String(reason || "").toLowerCase();
-  const pnlStr = fmtPnl(pnlUsd, pnlPct);
-  const pnlEmoji = (Number(pnlUsd) || 0) >= 0 ? "✅" : "🔴";
+  const pnlSol = usdToSol(pnlUsd);
+  const feesSol = feesUsd != null ? usdToSol(feesUsd) : null;
+  const pnlStr = fmtSolPnl(pnlSol, pnlPct);
+  const pnlEmoji = pnlSol >= 0 ? "✅" : "🔴";
   const ageStr = heldMinutes != null ? fmtAge(heldMinutes) : "—";
-  const feeStr = feesUsd != null ? `\n💎 Fees     $${Number(feesUsd).toFixed(2)}` : "";
+  const feeStr = feesSol != null ? `\n💎 Fees     ${fmtSol(feesSol)}` : "";
 
   if (r.includes("velocity") || r.includes("dump") || r.includes("safety")) {
     return sendHTML(
@@ -485,7 +500,7 @@ ${SEP}`
     );
   }
 
-  const isProfit = (Number(pnlUsd) || 0) >= 0;
+  const isProfit = pnlSol >= 0;
   const header = isProfit
     ? "╔═══════════════════════╗\n║   ✅ POSITION CLOSED  ║\n╚═══════════════════════╝"
     : "╔═══════════════════════╗\n║   🔴 POSITION CLOSED  ║\n╚═══════════════════════╝";
@@ -586,13 +601,15 @@ export function buildManagementCycleHtml({ positionData = [], actionMap = new Ma
       return act.action;
     })();
     const statusLabel = p.in_range ? "🟢 IN RANGE" : `🔴 OOR ${fmtAge(p.minutes_out_of_range)}`;
-    const pnl = Number(p.pnl_pct) || 0;
-    const pnlLine = `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}% ${pnl >= 0 ? "✅" : "🔴"}`;
+    const pnlPct = Number(p.pnl_pct) || 0;
+    // pnl_usd and value fields already in SOL when solMode=true
+    const pnlSol = Number(p.pnl_usd) || 0;
+    const pnlLine = `${fmtSolPnl(pnlSol, pnlPct)} ${pnlPct >= 0 ? "✅" : "🔴"}`;
     const yieldStr = p.fee_per_tvl_24h != null ? `${Number(p.fee_per_tvl_24h).toFixed(2)}% APR` : "—";
     return [
       `🪙 ${escHtml(p.pair)}`,
-      `├ 💵 Value      $${Number(p.total_value_usd || 0).toFixed(2)}`,
-      `├ 💎 Unclaimed  $${Number(p.unclaimed_fees_usd || 0).toFixed(2)}`,
+      `├ 💵 Value      ${fmtSol(p.total_value_usd || 0)}`,
+      `├ 💎 Unclaimed  ${fmtSol(p.unclaimed_fees_usd || 0)}`,
       `├ 📈 PnL        ${pnlLine}`,
       `├ 🌾 Yield      ${yieldStr}`,
       `├ ⏱️ Age        ${fmtAge(p.age_minutes)}`,
@@ -610,15 +627,15 @@ export function buildManagementCycleHtml({ positionData = [], actionMap = new Ma
   const summaryLines = noAction
     ? [
         "━━━ 💼 PORTFOLIO ━━━",
-        `💵 Total Value  $${totalValue.toFixed(2)}`,
-        `💎 Total Fees   $${totalFees.toFixed(2)}`,
+        `💵 Total Value  ${fmtSol(totalValue)}`,
+        `💎 Total Fees   ${fmtSol(totalFees)}`,
         `📈 Combined PnL ${avgPnl >= 0 ? "+" : ""}${avgPnl.toFixed(2)}%`,
       ]
     : [
         "━━━ 📊 SUMMARY ━━━",
         `📂 Positions    ${positionData.length} open`,
-        `💵 Total Value  $${totalValue.toFixed(2)}`,
-        `💎 Total Fees   $${totalFees.toFixed(2)}`,
+        `💵 Total Value  ${fmtSol(totalValue)}`,
+        `💎 Total Fees   ${fmtSol(totalFees)}`,
         `⚡ Action       ${positionData.some(p => (actionMap instanceof Map ? actionMap.get(p.position)?.action : null) !== "STAY") ? "Actions taken" : "No changes"}`,
       ];
 

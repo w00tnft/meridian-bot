@@ -1,6 +1,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
+import { getCachedSolPrice } from "./config.js";
 
 const STATE_FILE = "./state.json";
 const LESSONS_FILE = "./lessons.json";
@@ -30,11 +31,15 @@ export async function generateBriefing() {
   const perfSummary = getPerformanceSummary();
 
   // 5. Format Message
+  const solPrice = getCachedSolPrice();
+  const totalPnLSol = solPrice > 0 ? totalPnLUsd / solPrice : 0;
+  const totalFeesSol = solPrice > 0 ? totalFeesUsd / solPrice : 0;
+
   const dateStr = now.toLocaleDateString("en-US", {
     day: "numeric", month: "short", year: "numeric", timeZone: "UTC",
   });
-  const pnlSign = totalPnLUsd >= 0 ? "+" : "";
-  const pnlEmoji = totalPnLUsd >= 0 ? "✅" : "🔴";
+  const pnlSign = totalPnLSol >= 0 ? "+" : "";
+  const pnlEmoji = totalPnLSol >= 0 ? "✅" : "🔴";
   const winCount = perfLast24h.filter(p => (p.pnl_usd || 0) > 0).length;
   const lossCount = perfLast24h.filter(p => (p.pnl_usd || 0) < 0).length;
   const winRateStr = perfLast24h.length > 0
@@ -45,8 +50,9 @@ export async function generateBriefing() {
     ? lessonsLast24h[lessonsLast24h.length - 1].rule.slice(0, 120)
     : "No new lessons recorded overnight.";
 
-  const allTimePnlStr = perfSummary
-    ? `${perfSummary.total_pnl_usd >= 0 ? "+" : ""}$${perfSummary.total_pnl_usd.toFixed(2)}`
+  const allTimeSol = perfSummary && solPrice > 0 ? perfSummary.total_pnl_usd / solPrice : null;
+  const allTimePnlStr = allTimeSol != null
+    ? `${allTimeSol >= 0 ? "+" : ""}${Math.abs(allTimeSol).toFixed(4)} SOL`
     : "N/A";
 
   const lines = [
@@ -56,8 +62,8 @@ export async function generateBriefing() {
     `📅 ${dateStr}`,
     "",
     "━━━ 📊 PERFORMANCE ━━━",
-    `💰 Net PnL      ${pnlSign}$${Math.abs(totalPnLUsd).toFixed(2)} ${pnlEmoji}`,
-    `💎 Fees Earned  $${totalFeesUsd.toFixed(2)}`,
+    `💰 Net PnL      ${pnlSign}${Math.abs(totalPnLSol).toFixed(4)} SOL ${pnlEmoji}`,
+    `💎 Fees Earned  ${totalFeesSol.toFixed(4)} SOL`,
     `🎯 Win Rate     ${winRateStr}`,
     `📥 Opened       ${openedLast24h.length} position${openedLast24h.length !== 1 ? "s" : ""}`,
     `📤 Closed       ${closedLast24h.length} position${closedLast24h.length !== 1 ? "s" : ""}`,
