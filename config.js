@@ -228,6 +228,19 @@ export function computeDeployAmount(walletSol) {
   return parseFloat(result.toFixed(2));
 }
 
+// ─── SOL Price Cache ────────────────────────────────────────────
+// Updated whenever getWalletBalances() runs (wallet.js). Used for
+// USD → SOL conversion in display-only contexts (telegram, briefing).
+let _cachedSolPrice = 150; // reasonable fallback until first wallet fetch
+
+export function getCachedSolPrice() {
+  return _cachedSolPrice;
+}
+
+export function setCachedSolPrice(price) {
+  if (typeof price === "number" && price > 0) _cachedSolPrice = price;
+}
+
 /**
  * Reload user-config.json and apply updated screening thresholds to the
  * in-memory config object. Called after threshold evolution so the next

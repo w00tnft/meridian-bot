@@ -7,7 +7,7 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { log } from "../logger.js";
-import { config } from "../config.js";
+import { config, setCachedSolPrice } from "../config.js";
 
 let _connection = null;
 let _wallet = null;
@@ -88,6 +88,7 @@ export async function getWalletBalances() {
     const solBalance = solEntry?.balance || 0;
     const solPrice = solEntry?.pricePerToken || 0;
     const solUsd = solEntry?.usdValue || 0;
+    setCachedSolPrice(solPrice);
     const usdcBalance = usdcEntry?.balance || 0;
 
     // ─── Map all tokens ───────────────────────────────────────
