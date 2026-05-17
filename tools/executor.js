@@ -136,38 +136,51 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  // Strategy 2: pool/token age must be at least 72 hours (HC override allowed under strict conditions)
+  // Strategy 2: pool/token age must be at least 72 hours
+  // Two-tier HC Override for 24-72h pools:
+  //   < 24h      → always blocked, no exceptions
+  //   24–48h     → Tier 1 HC Override (organic ≥ 80%, score ≥ 4.3)
+  //   48–72h     → Tier 2 HC Override (organic ≥ 75%, score ≥ 4.0)
+  //   ≥ 72h      → normal deploy, no check needed
   const tokenAgeHours = poolDetailTokenCreatedAt(detail);
   const MIN_POOL_AGE_HOURS = 72;
   if (tokenAgeHours != null && tokenAgeHours < MIN_POOL_AGE_HOURS) {
-    // High Conviction Override: 3 conditions (simplified from 5)
-    const HC_MIN_AGE_HOURS = 24;
-    const HC_MIN_ORGANIC   = 80;
-    const HC_MIN_SCORE     = 4.3;
-
     const organicScore = numberOrNull(detail?.organic_score ?? args.organic_score);
     const feeTvlRatio  = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
     const score        = numberOrNull(args.score);
     const amountSol    = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
 
-    const ageOk     = tokenAgeHours >= HC_MIN_AGE_HOURS;
-    const organicOk = organicScore != null && organicScore >= HC_MIN_ORGANIC;
-    const scoreOk   = score        != null && score         >= HC_MIN_SCORE;
+    if (tokenAgeHours < 24) {
+      return {
+        pass: false,
+        reason: `[SAFETY] Pool age block: ${args.pool_address} is only ${tokenAgeHours.toFixed(1)}h old (minimum 24h — no exceptions)`,
+      };
+    }
 
-    if (ageOk && organicOk && scoreOk) {
-      log("executor", `[SAFETY] High conviction override: ${args.pool_address} — age ${tokenAgeHours}h, score ${score}/5, organic ${organicScore}%`);
-      return { pass: true, highConviction: true, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
+    // Determine tier thresholds
+    const isTier1 = tokenAgeHours < 48; // 24–48h
+    const minOrganic = isTier1 ? 80 : 75;
+    const minScore   = isTier1 ? 4.3 : 4.0;
+    const tierLabel  = isTier1 ? "Tier 1" : "Tier 2";
+    const tierWindow = isTier1 ? "24-48h" : "48-72h";
+
+    const organicOk = organicScore != null && organicScore >= minOrganic;
+    const scoreOk   = score        != null && score         >= minScore;
+
+    if (organicOk && scoreOk) {
+      log("safety", `[SAFETY] ⚡ ${tierLabel} HC Override: ${tokenAgeHours.toFixed(1)}h pool — organic ${organicScore}%, score ${score}`);
+      const hcTier = isTier1 ? 1 : 2;
+      return { pass: true, highConviction: true, hcTier, tierWindow, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
     }
 
     const failReasons = [
-      !ageOk     && `age ${tokenAgeHours}h < ${HC_MIN_AGE_HOURS}h`,
-      !organicOk && `organic ${organicScore ?? "unknown"}% < ${HC_MIN_ORGANIC}%`,
-      !scoreOk   && `score ${score ?? "not provided"} < ${HC_MIN_SCORE}`,
+      !organicOk && `organic ${organicScore ?? "unknown"}% < ${minOrganic}%`,
+      !scoreOk   && `score ${score ?? "not provided"} < ${minScore}`,
     ].filter(Boolean).join(", ");
 
     return {
       pass: false,
-      reason: `[SAFETY] Pool age block: ${args.pool_address} is only ${tokenAgeHours}h old (min ${MIN_POOL_AGE_HOURS}h). HC override failed: ${failReasons}`,
+      reason: `[SAFETY] Pool age block: ${args.pool_address} is ${tokenAgeHours.toFixed(1)}h old. ${tierLabel} HC Override failed: ${failReasons}`,
     };
   }
 
@@ -654,8 +667,7 @@ export async function executeTool(name, args) {
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
         if (safetyCheck?.highConviction && result.position) {
-          // HC positions use standard stop loss (-8%) — no special override
-          notifyHighConviction({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), ageHours: safetyCheck.tokenAgeHours, score: safetyCheck.score, organic: safetyCheck.organicScore, feeTvlRatio: safetyCheck.feeTvlRatio, amountSol: args.amount_y ?? args.amount_sol ?? 0 }).catch(() => {});
+          notifyHighConviction({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), ageHours: safetyCheck.tokenAgeHours, score: safetyCheck.score, organic: safetyCheck.organicScore, feeTvlRatio: safetyCheck.feeTvlRatio, amountSol: args.amount_y ?? args.amount_sol ?? 0, hcTier: safetyCheck.hcTier ?? 1, tierWindow: safetyCheck.tierWindow }).catch(() => {});
         }
       } else if (name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0, feesUsd: result.fees_usd ?? null, reason: args.reason ?? null, heldMinutes: result.minutes_held ?? null }).catch(() => {});
@@ -880,17 +892,24 @@ async function runSafetyChecks(name, args) {
         _volatility24h = range24h;
 
         // ── Hardcoded distribution strategy (LLM never chooses this) ──
+        // HARDCODED STRATEGY — curve removed entirely
         let hardcodedStrategy;
-        if (range24h > 15) {
+        if (range24h >= 5) {
           hardcodedStrategy = "bid_ask";
-        } else if (range24h >= 5) {
-          hardcodedStrategy = "curve";
         } else {
           hardcodedStrategy = "spot";
         }
         args.strategy = hardcodedStrategy;
-        _strategyLabel = `${hardcodedStrategy.toUpperCase().replace("_", "-")} (hardcoded, 24h vol: ${range24h.toFixed(1)}%)`;
-        log("strategy", `[STRATEGY] Hardcoded: ${hardcodedStrategy} (24h volatility: ${range24h.toFixed(1)}%)`);
+        _strategyLabel = hardcodedStrategy === "bid_ask" ? "BID-ASK (balanced)" : "SPOT (SOL-only)";
+        log("strategy", `[STRATEGY] Hardcoded: ${hardcodedStrategy} (volatility: ${range24h.toFixed(1)}%)`);
+
+        // DEPLOYMENT MODE: spot = single-side SOL only
+        if (hardcodedStrategy === "spot") {
+          args.bins_above = 0;
+          log("strategy", "[STRATEGY] Spot: single-side SOL — zero token exposure, all bins below price");
+        } else {
+          log("strategy", "[STRATEGY] Bid-ask: balanced — fees both directions");
+        }
 
         // Adjust bins_below based on 24h price range
         if (range24h > 0 && args.bins_below != null) {
@@ -927,12 +946,13 @@ async function runSafetyChecks(name, args) {
 
       log("safety", `[SAFETY] Price centering: bins_below=${binsBelow} bins_above=${binsAboveRequested} percentile=${pctFromBottom.toFixed(1)}% strategy=${strategyForCentering}`);
 
-      if (binsAboveRequested === 0 && (strategyForCentering === "bid_ask" || strategyForCentering === "spot")) {
-        // Price is at 100th percentile — guaranteed OOR on any upward move
-        const msg = `[SAFETY] Price centering block — bins_above=0 with ${strategyForCentering} strategy is an edge deployment (price at ${pctFromBottom.toFixed(0)}th percentile). Any upward tick causes immediate OOR. Provide bins_above > 0 to center the range.`;
+      if (binsAboveRequested === 0 && strategyForCentering === "bid_ask") {
+        // bid_ask with bins_above=0: price at 100th percentile — guaranteed OOR on any upward move
+        const msg = `[SAFETY] Price centering block — bins_above=0 with bid_ask strategy is an edge deployment. Any upward tick causes immediate OOR. Provide bins_above > 0.`;
         log("safety", msg);
         return { pass: false, reason: msg };
       }
+      // spot with bins_above=0 is intentional — single-side SOL, all bins below price
 
       if (totalBins > 0) {
         _pricePct = pctFromBottom;

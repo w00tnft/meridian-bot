@@ -828,7 +828,7 @@ The strategy will be available for selection before future deployments.`,
           id:           { type: "string", description: "Short slug e.g. 'overnight_classic_bid_ask', 'panda_strat'" },
           name:         { type: "string", description: "Human-readable name" },
           author:       { type: "string", description: "Strategy author/creator" },
-          lp_strategy:  { type: "string", enum: ["bid_ask", "spot", "curve"], description: "LP strategy type" },
+          lp_strategy:  { type: "string", enum: ["bid_ask", "spot"], description: "LP strategy type" },
           token_criteria: {
             type: "object",
             description: "Token selection criteria",

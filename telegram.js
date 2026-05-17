@@ -475,6 +475,29 @@ ${SEP}`
   );
 }
 
+export async function notifyTrailingTp({ pair, pnlUsd, pnlPct, feesUsd = null, heldMinutes = null, peakPnl = null, dropFromPeak = null }) {
+  if (hasActiveLiveMessage()) return;
+  const pnlSol = usdToSol(pnlUsd);
+  const feesSol = feesUsd != null ? usdToSol(feesUsd) : null;
+  const pnlStr = fmtSolPnl(pnlSol, pnlPct);
+  const ageStr = heldMinutes != null ? fmtAge(heldMinutes) : "—";
+  const feeStr = feesSol != null ? `\n💎 Fees     ${fmtSol(feesSol)}` : "";
+  const peakStr = peakPnl != null ? `+${Number(peakPnl).toFixed(2)}%` : "—";
+  const dropStr = dropFromPeak != null ? `-${Number(dropFromPeak).toFixed(2)}% from peak` : "—";
+  return sendHTML(
+`╔═══════════════════════╗
+║   🎯 TRAILING TP      ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+🏔️ Peak PnL  ${peakStr}
+📉 Drop      ${dropStr}
+💰 Exit PnL ${pnlStr}${feeStr}
+⏱️ Held     ${ageStr}
+🔒 Profit locked!
+${SEP}`
+  );
+}
+
 export async function notifyRecoveryExit({ pair, pnlUsd, pnlPct, feesUsd = null, heldMinutes = null, maxDd = null, recoveryPct = null }) {
   if (hasActiveLiveMessage()) return;
   const pnlSol = usdToSol(pnlUsd);
@@ -507,6 +530,16 @@ export async function notifyClose({ pair, pnlUsd, pnlPct, feesUsd = null, reason
   const pnlEmoji = pnlSol >= 0 ? "✅" : "🔴";
   const ageStr = heldMinutes != null ? fmtAge(heldMinutes) : "—";
   const feeStr = feesSol != null ? `\n💎 Fees     ${fmtSol(feesSol)}` : "";
+
+  if (r.includes("trailing_tp")) {
+    let parsedPeakPnl = null;
+    let parsedDrop = null;
+    const peakMatch = r.match(/peaked\s*\+?([\d.]+)%/);
+    if (peakMatch) parsedPeakPnl = parseFloat(peakMatch[1]);
+    const dropMatch = r.match(/dropped?\s*([\d.]+)%/);
+    if (dropMatch) parsedDrop = parseFloat(dropMatch[1]);
+    return notifyTrailingTp({ pair, pnlUsd, pnlPct, feesUsd, heldMinutes, peakPnl: parsedPeakPnl, dropFromPeak: parsedDrop });
+  }
 
   if (r.includes("drawdown_recovery")) {
     // Parse maxDd and recoveryPct from reason string if not provided directly
@@ -642,21 +675,22 @@ Been OOR for ${fmtAge(minutesOOR)}`
   );
 }
 
-export async function notifyHighConviction({ pair, ageHours, score, organic, feeTvlRatio, amountSol }) {
+export async function notifyHighConviction({ pair, ageHours, score, organic, feeTvlRatio, amountSol, hcTier = 1, tierWindow = null }) {
   if (hasActiveLiveMessage()) return;
   const now = new Date();
+  const tierLabel = hcTier === 2 ? "HC OVERRIDE T2" : "HC OVERRIDE T1";
+  const windowStr = tierWindow ?? (hcTier === 2 ? "48-72h" : "24-48h");
+  const ageStr = ageHours != null ? `${ageHours.toFixed(1)}h (${windowStr} window)` : "?";
   await sendHTML(
 `╔═══════════════════════╗
-║  ⚡ HIGH CONVICTION   ║
+║  ⚡ ${tierLabel.padEnd(16)}║
 ╚═══════════════════════╝
-🪙 Token    ${escHtml(pair)}
-⏱️ Age       ${ageHours != null ? ageHours.toFixed(1) + "h" : "?"}
-⭐ Score     ${score != null ? score.toFixed(1) + "/5" : "?"}
-🌿 Organic   ${organic != null ? organic + "%" : "?"}
-💹 Fee/TVL   ${feeTvlRatio != null ? feeTvlRatio.toFixed(2) : "?"}
-💵 Amount    ${amountSol} SOL (capped — new pool)
-🛡️ SL        -10% | Max 2 days
-⏰ ${fmtUtcDate(now)} ${fmtUtcTime(now)}
+🪙 Pool     ${escHtml(pair)}
+⏱️ Age      ${ageStr}
+⭐ Score    ${score != null ? score.toFixed(1) + "/5" : "?"}
+🎯 Organic  ${organic != null ? organic + "%" : "?"}
+💵 Amount   ${amountSol} SOL
+⚠️ Young pool — monitoring closely
 ${SEP}`
   );
 }
@@ -748,8 +782,13 @@ export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletS
       const rrPass = deployMeta.rrExpected >= 4;
       rrLine = `⚖️ R:R           ${deployMeta.rrExpected}% expected / ${deployMeta.rrRisk}% risk ${rrPass ? "✅" : "❌"}`;
     }
-    if (deployMeta.strategyLabel) {
-      strategyLine = `📊 Strategy      ${deployMeta.strategyLabel}`;
+    if (deployMeta.strategyLabel != null) {
+      const strategyDisplay = deployMeta.strategyLabel.includes("bid_ask") || deployMeta.strategyLabel.toLowerCase().includes("bid-ask")
+        ? "BID-ASK (balanced)"
+        : deployMeta.strategyLabel.toLowerCase().includes("spot")
+          ? "SPOT (SOL-only)"
+          : deployMeta.strategyLabel;
+      strategyLine = `📊 Strategy      ${strategyDisplay}`;
     }
     if (deployMeta.pricePct != null) {
       const centered = deployMeta.pricePct >= 25 && deployMeta.pricePct <= 75;
