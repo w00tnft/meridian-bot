@@ -10,7 +10,7 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, getLastDeployMeta } from "./tools/executor.js";
 import {
   startPolling,
   stopPolling,
@@ -858,6 +858,7 @@ IMPORTANT:
             btcCheck: null,
             walletSol: screenWalletSol,
             deployAmount: screenDeployAmount,
+            deployMeta: getLastDeployMeta(),
           });
           if (liveMessage) {
             await liveMessage.finalize("✅ Done").catch(() => {});
@@ -1081,10 +1082,16 @@ function getDeterministicCloseRule(position, managementConfig) {
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60
   ) {
-    return { action: "CLOSE", rule: 5, reason: "low yield" };
+    // Fix 5: don't close early if combined return < 2% — let fees compound first
+    const combinedReturn = (position.pnl_pct ?? 0) + (position.fee_per_tvl_24h ?? 0);
+    if (position.in_range && combinedReturn < 2) {
+      log("cron", `[MANAGE] Combined return ${combinedReturn.toFixed(1)}% below 2% threshold — staying to let fees compound`);
+    } else {
+      return { action: "CLOSE", rule: 5, reason: "low yield" };
+    }
   }
-  // Max position age: HC positions close after 2 days; normal positions after 5 days
-  const effectiveMaxAgeMinutes = tracked?.maxAgeMinutes ?? (5 * 24 * 60);
+  // Max position age: HC positions close after 2 days; normal positions after 3 days
+  const effectiveMaxAgeMinutes = tracked?.maxAgeMinutes ?? (3 * 24 * 60);
   const effectiveMaxAgeDays = Math.round(effectiveMaxAgeMinutes / (24 * 60));
   if ((position.age_minutes ?? 0) >= effectiveMaxAgeMinutes) {
     return { action: "CLOSE", rule: 6, reason: `max age reached (${effectiveMaxAgeDays} day${effectiveMaxAgeDays !== 1 ? "s" : ""})` };

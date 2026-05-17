@@ -1,0 +1,8 @@
+{
+  "RoyalPop": {
+    "mint": "RoyalPop",
+    "symbol": "RoyalPop",
+    "reason": "Spot OOR loss — high volatility mismatch. 24h move exceeded range within minutes of deploy.",
+    "blacklisted_at": "2026-05-17T00:00:00.000Z"
+  }
+}

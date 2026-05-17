@@ -1,0 +1,55 @@
+{
+  "lessons": [
+    {
+      "id": 1747440000000,
+      "rule": "AVOID: Spot distribution on volatile tokens (>10% daily move). RoyalPop-SOL loss — price dumped instantly out of range with spot strategy. Use bid_ask for anything showing >10% 24h volatility.",
+      "tags": ["royalpop", "distribution", "volatility", "forced_lesson"],
+      "outcome": "loss",
+      "sourceType": "manual",
+      "pinned": true,
+      "role": "SCREENER",
+      "created_at": "2026-05-17T00:00:00.000Z"
+    },
+    {
+      "id": 1747440000001,
+      "rule": "AVOID: Deploying when price is in bottom 30% of range. Position goes OOR immediately on any downward tick. Always verify active bin is between 30th-70th percentile of proposed range before deploying.",
+      "tags": ["royalpop", "centering", "oor", "forced_lesson"],
+      "outcome": "loss",
+      "sourceType": "manual",
+      "pinned": true,
+      "role": "SCREENER",
+      "created_at": "2026-05-17T00:00:01.000Z"
+    },
+    {
+      "id": 1747440000002,
+      "rule": "AVOID: RoyalPop-SOL type pools — high volatility + spot strategy = instant OOR on pump. Spot is only appropriate for low-volatility (<5% 24h) pairs. High-volatility tokens need bid_ask to capture fees across the price sweep.",
+      "tags": ["royalpop", "distribution", "volatility", "forced_lesson"],
+      "outcome": "loss",
+      "sourceType": "manual",
+      "pinned": true,
+      "role": "SCREENER",
+      "created_at": "2026-05-17T00:00:02.000Z"
+    },
+    {
+      "id": 1747440000003,
+      "rule": "PREFER: Bid-ask distribution when 24h volatility > 10%. Bid-ask concentrates liquidity at the active price and earns fees even as price sweeps — spot fills the entire range uniformly and goes OOR on any large move.",
+      "tags": ["distribution", "volatility", "bid_ask", "forced_lesson"],
+      "outcome": "win",
+      "sourceType": "manual",
+      "pinned": true,
+      "role": "SCREENER",
+      "created_at": "2026-05-17T00:00:03.000Z"
+    },
+    {
+      "id": 1747440000004,
+      "rule": "PREFER: Verify price is centered (30th-70th percentile of proposed bin range) before deploying. Centering ensures the position captures fees in both directions and is not already OOR at entry.",
+      "tags": ["centering", "distribution", "forced_lesson"],
+      "outcome": "win",
+      "sourceType": "manual",
+      "pinned": true,
+      "role": "SCREENER",
+      "created_at": "2026-05-17T00:00:04.000Z"
+    }
+  ],
+  "performance": []
+}

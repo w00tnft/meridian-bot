@@ -678,13 +678,31 @@ export function buildManagementCycleHtml({ positionData = [], actionMap = new Ma
   ].join("\n");
 }
 
-export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletSol = null, deployAmount = null }) {
+export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletSol = null, deployAmount = null, deployMeta = null }) {
   const timeStr = fmtUtcTime();
   const btcLabel = btcCheck?.downtrend
     ? `⚠️  ${btcCheck.btc_change_4h != null ? btcCheck.btc_change_4h.toFixed(1) + "% 4h" : "Downtrend"}`
     : "✅ Neutral";
   const isHighConviction = /HIGH CONVICTION/i.test(content);
   const analysisHeader = isHighConviction ? "━━━ ⚡ AI ANALYSIS ━━━" : "━━━ 🤖 AI ANALYSIS ━━━";
+
+  let rrLine = null;
+  let strategyLine = null;
+  let priceLine = null;
+  if (deployMeta) {
+    if (deployMeta.rrExpected != null) {
+      const rrPass = deployMeta.rrExpected >= 4;
+      rrLine = `⚖️ R:R           ${deployMeta.rrExpected}% expected / ${deployMeta.rrRisk}% risk ${rrPass ? "✅" : "❌"}`;
+    }
+    if (deployMeta.strategyLabel) {
+      strategyLine = `📊 Strategy      ${deployMeta.strategyLabel}`;
+    }
+    if (deployMeta.pricePct != null) {
+      const centered = deployMeta.pricePct >= 25 && deployMeta.pricePct <= 75;
+      priceLine = `📍 Price pos     ${deployMeta.pricePct}th percentile ${centered ? "✅" : "⚠️"}`;
+    }
+  }
+
   const parts = [
     "╔═══════════════════════╗",
     "║   🔍 SCREENING CYCLE  ║",
@@ -694,6 +712,9 @@ export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletS
     `${btcCheck?.downtrend ? "⚠️" : "✅"} BTC Trend    ${btcLabel}`,
     walletSol  != null ? `✅ Wallet       ${Number(walletSol).toFixed(3)} SOL`  : null,
     deployAmount != null ? `📊 Deploy       ${deployAmount} SOL`                : null,
+    rrLine,
+    strategyLine,
+    priceLine,
     "",
     analysisHeader,
     content || "No report",

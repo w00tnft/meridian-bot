@@ -3,7 +3,7 @@
   "useDiscordSignals": false,
   "discordSignalMode": "merge",
   "maxPositions": 2,
-  "stopLossPct": -15,
+  "stopLossPct": -8,
   "maxBinStep": 200,
   "maxTvl": 400000,
   "minHolders": 250,
