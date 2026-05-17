@@ -31,7 +31,7 @@ import {
   buildScreeningCycleHtml,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFailedClose, getFailedCloseAttempts, clearFailedClose, pruneFailedCloses } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFailedClose, getFailedCloseAttempts, clearFailedClose, pruneFailedCloses, updateMaxDrawdown } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkPriceVelocity, checkBtcTrend } from "./tools/okx.js";
@@ -251,6 +251,11 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // Clean up failedCloses entries for positions that no longer exist
     pruneFailedCloses(positionData.map((p) => p.position));
+
+    // Track max drawdown for recovery exit logic
+    for (const p of positionData) {
+      if (p.pnl_pct != null) updateMaxDrawdown(p.position, p.pnl_pct);
+    }
 
     // Price velocity emergency circuit breaker — runs before any LLM or rule check
     const velocityCloseSet = new Set();
@@ -1043,6 +1048,9 @@ function formatCandidates(candidates) {
   ].join("\n");
 }
 
+// SINGLE SOURCE OF TRUTH FOR ALL EXITS — LLM never closes positions
+// Priority order: velocity > btc_downtrend > emergency_retry > exit (trailing TP) > deterministic rules below
+// Rule 1: stop loss | Rule 2: take profit | Rule 3: drawdown recovery | Rule 4: pumped above range | Rule 5: OOR | Rule 6: low yield | Rule 7: max age
 function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
@@ -1055,47 +1063,70 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
+  // Rule 1: Stop loss
   const effectiveStopLoss = tracked?.stopLossPct ?? managementConfig.stopLossPct;
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= effectiveStopLoss) {
-    return { action: "CLOSE", rule: 1, reason: tracked?.highConviction ? `stop loss (HC -10%)` : "stop loss" };
+    return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
+
+  // Rule 2: Take profit
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
+
+  // Rule 3: Max drawdown recovery exit — close when position has recovered 60%+ from its worst drawdown
+  if (!pnlSuspect && position.pnl_pct != null) {
+    const maxDD = tracked?.max_drawdown ?? 0;
+    if (maxDD < -3) {
+      const recovery = (position.pnl_pct - maxDD) / Math.abs(maxDD);
+      if (recovery >= 0.6) {
+        log("cron", `[MANAGE] Recovery exit — maxDD ${maxDD.toFixed(2)}%, recovered ${(recovery * 100).toFixed(0)}% → closing`);
+        return {
+          action: "CLOSE",
+          rule: 3,
+          reason: `drawdown_recovery: dropped ${maxDD.toFixed(2)}%, recovered ${(recovery * 100).toFixed(0)}% of drawdown`,
+          maxDd: maxDD,
+          recoveryPct: Math.round(recovery * 100),
+        };
+      }
+    }
+  }
+
+  // Rule 4: Pumped far above range
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
+    return { action: "CLOSE", rule: 4, reason: "pumped far above range" };
   }
+
+  // Rule 5: OOR
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
+    return { action: "CLOSE", rule: 5, reason: "OOR" };
   }
+
+  // Rule 6: Low yield
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60
   ) {
-    // Fix 5: don't close early if combined return < 2% — let fees compound first
-    const combinedReturn = (position.pnl_pct ?? 0) + (position.fee_per_tvl_24h ?? 0);
-    if (position.in_range && combinedReturn < 2) {
-      log("cron", `[MANAGE] Combined return ${combinedReturn.toFixed(1)}% below 2% threshold — staying to let fees compound`);
-    } else {
-      return { action: "CLOSE", rule: 5, reason: "low yield" };
-    }
+    return { action: "CLOSE", rule: 6, reason: "low yield" };
   }
-  // Max position age: HC positions close after 2 days; normal positions after 3 days
+
+  // Rule 7: Max age
   const effectiveMaxAgeMinutes = tracked?.maxAgeMinutes ?? (3 * 24 * 60);
   const effectiveMaxAgeDays = Math.round(effectiveMaxAgeMinutes / (24 * 60));
   if ((position.age_minutes ?? 0) >= effectiveMaxAgeMinutes) {
-    return { action: "CLOSE", rule: 6, reason: `max age reached (${effectiveMaxAgeDays} day${effectiveMaxAgeDays !== 1 ? "s" : ""})` };
+    return { action: "CLOSE", rule: 7, reason: `max age reached (${effectiveMaxAgeDays} day${effectiveMaxAgeDays !== 1 ? "s" : ""})` };
   }
+
   return null;
 }
 

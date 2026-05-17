@@ -475,7 +475,30 @@ ${SEP}`
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct, feesUsd = null, reason = null, heldMinutes = null }) {
+export async function notifyRecoveryExit({ pair, pnlUsd, pnlPct, feesUsd = null, heldMinutes = null, maxDd = null, recoveryPct = null }) {
+  if (hasActiveLiveMessage()) return;
+  const pnlSol = usdToSol(pnlUsd);
+  const feesSol = feesUsd != null ? usdToSol(feesUsd) : null;
+  const pnlStr = fmtSolPnl(pnlSol, pnlPct);
+  const ageStr = heldMinutes != null ? fmtAge(heldMinutes) : "—";
+  const feeStr = feesSol != null ? `\n💎 Fees     ${fmtSol(feesSol)}` : "";
+  const ddStr = maxDd != null ? `${Number(maxDd).toFixed(2)}%` : "—";
+  const recStr = recoveryPct != null ? `+${recoveryPct}% from bottom` : "—";
+  return sendHTML(
+`╔═══════════════════════╗
+║   📈 RECOVERY EXIT    ║
+╚═══════════════════════╝
+🪙 Token    ${escHtml(pair)}
+📉 Max DD   ${ddStr}
+📈 Recovery ${recStr}
+💰 Exit PnL ${pnlStr}${feeStr}
+⏱️ Held     ${ageStr}
+💡 Saved from deeper loss
+${SEP}`
+  );
+}
+
+export async function notifyClose({ pair, pnlUsd, pnlPct, feesUsd = null, reason = null, heldMinutes = null, maxDd = null, recoveryPct = null }) {
   if (hasActiveLiveMessage()) return;
   const r = String(reason || "").toLowerCase();
   const pnlSol = usdToSol(pnlUsd);
@@ -484,6 +507,22 @@ export async function notifyClose({ pair, pnlUsd, pnlPct, feesUsd = null, reason
   const pnlEmoji = pnlSol >= 0 ? "✅" : "🔴";
   const ageStr = heldMinutes != null ? fmtAge(heldMinutes) : "—";
   const feeStr = feesSol != null ? `\n💎 Fees     ${fmtSol(feesSol)}` : "";
+
+  if (r.includes("drawdown_recovery")) {
+    // Parse maxDd and recoveryPct from reason string if not provided directly
+    // reason format: "drawdown_recovery: dropped -4.2%, recovered 68% of drawdown"
+    let parsedMaxDd = maxDd;
+    let parsedRecoveryPct = recoveryPct;
+    if (parsedMaxDd == null) {
+      const ddMatch = r.match(/dropped\s*([-\d.]+)%/);
+      if (ddMatch) parsedMaxDd = parseFloat(ddMatch[1]);
+    }
+    if (parsedRecoveryPct == null) {
+      const recMatch = r.match(/recovered\s*(\d+)%/);
+      if (recMatch) parsedRecoveryPct = parseInt(recMatch[1], 10);
+    }
+    return notifyRecoveryExit({ pair, pnlUsd, pnlPct, feesUsd, heldMinutes, maxDd: parsedMaxDd, recoveryPct: parsedRecoveryPct });
+  }
 
   if (r.includes("velocity") || r.includes("dump") || r.includes("safety")) {
     return sendHTML(

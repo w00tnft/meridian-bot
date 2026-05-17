@@ -97,6 +97,8 @@ export function trackPosition({
     closed_at: null,
     notes: [],
     peak_pnl_pct: 0,
+    max_drawdown: 0,        // lowest PnL% seen (most negative value)
+    max_drawdown_at: null,  // ISO timestamp of max drawdown
     pending_peak_pnl_pct: null,
     pending_peak_started_at: null,
     pending_trailing_current_pnl_pct: null,
@@ -360,6 +362,23 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
 export function getTrackedPosition(position_address) {
   const state = load();
   return state.positions[position_address] || null;
+}
+
+/**
+ * Update max drawdown tracking for a position.
+ * Called each management cycle with the current PnL%.
+ */
+export function updateMaxDrawdown(position_address, currentPnlPct) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return;
+  const pnl = Number(currentPnlPct);
+  if (!Number.isFinite(pnl)) return;
+  if (pnl < (pos.max_drawdown ?? 0)) {
+    pos.max_drawdown = pnl;
+    pos.max_drawdown_at = new Date().toISOString();
+    save(state);
+  }
 }
 
 /**
