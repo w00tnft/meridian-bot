@@ -140,35 +140,29 @@ async function validateDeployPoolThresholds(args) {
   const tokenAgeHours = poolDetailTokenCreatedAt(detail);
   const MIN_POOL_AGE_HOURS = 72;
   if (tokenAgeHours != null && tokenAgeHours < MIN_POOL_AGE_HOURS) {
-    // High Conviction Override: ALL five conditions must pass simultaneously
-    const HC_MIN_AGE_HOURS    = 24;
-    const HC_MIN_ORGANIC      = 85;
-    const HC_MIN_FEE_TVL      = 0.8;
-    const HC_MIN_SCORE        = 4.5;
-    const HC_MAX_AMOUNT_SOL   = 0.25;
+    // High Conviction Override: 3 conditions (simplified from 5)
+    const HC_MIN_AGE_HOURS = 24;
+    const HC_MIN_ORGANIC   = 80;
+    const HC_MIN_SCORE     = 4.3;
 
-    const organicScore  = numberOrNull(detail?.organic_score ?? args.organic_score);
-    const feeTvlRatio   = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
-    const score         = numberOrNull(args.score);
-    const amountSol     = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
+    const organicScore = numberOrNull(detail?.organic_score ?? args.organic_score);
+    const feeTvlRatio  = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
+    const score        = numberOrNull(args.score);
+    const amountSol    = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
 
     const ageOk     = tokenAgeHours >= HC_MIN_AGE_HOURS;
     const organicOk = organicScore != null && organicScore >= HC_MIN_ORGANIC;
-    const feeTvlOk  = feeTvlRatio  != null && feeTvlRatio  >= HC_MIN_FEE_TVL;
     const scoreOk   = score        != null && score         >= HC_MIN_SCORE;
-    const amountOk  = amountSol    != null && amountSol     <= HC_MAX_AMOUNT_SOL;
 
-    if (ageOk && organicOk && feeTvlOk && scoreOk && amountOk) {
-      log("executor", `[SAFETY] High conviction override: ${args.pool_address} — age ${tokenAgeHours}h, score ${score}/5, organic ${organicScore}%, fee/tvl ${feeTvlRatio?.toFixed(2)} — deploying ${amountSol} SOL (reduced size)`);
+    if (ageOk && organicOk && scoreOk) {
+      log("executor", `[SAFETY] High conviction override: ${args.pool_address} — age ${tokenAgeHours}h, score ${score}/5, organic ${organicScore}%`);
       return { pass: true, highConviction: true, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
     }
 
     const failReasons = [
       !ageOk     && `age ${tokenAgeHours}h < ${HC_MIN_AGE_HOURS}h`,
       !organicOk && `organic ${organicScore ?? "unknown"}% < ${HC_MIN_ORGANIC}%`,
-      !feeTvlOk  && `fee/tvl ${feeTvlRatio ?? "unknown"} < ${HC_MIN_FEE_TVL}`,
       !scoreOk   && `score ${score ?? "not provided"} < ${HC_MIN_SCORE}`,
-      !amountOk  && `amount ${amountSol} SOL > ${HC_MAX_AMOUNT_SOL} SOL cap`,
     ].filter(Boolean).join(", ");
 
     return {
@@ -660,9 +654,7 @@ export async function executeTool(name, args) {
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
         if (safetyCheck?.highConviction && result.position) {
-          const HC_SL_PCT = -10;
-          const HC_MAX_AGE_MINUTES = 2 * 24 * 60; // 2 days
-          setPositionHighConvictionFlags(result.position, { stopLossPct: HC_SL_PCT, maxAgeMinutes: HC_MAX_AGE_MINUTES });
+          // HC positions use standard stop loss (-8%) — no special override
           notifyHighConviction({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), ageHours: safetyCheck.tokenAgeHours, score: safetyCheck.score, organic: safetyCheck.organicScore, feeTvlRatio: safetyCheck.feeTvlRatio, amountSol: args.amount_y ?? args.amount_sol ?? 0 }).catch(() => {});
         }
       } else if (name === "close_position") {
@@ -872,7 +864,8 @@ async function runSafetyChecks(name, args) {
         log("executor_warn", `BTC trend check failed: ${e.message}`);
       }
 
-      // Price velocity + volatility window circuit breakers, bin range + strategy adjustment
+      // ── Price velocity circuit breaker ────────────────────────────
+      // Hardcoded strategy is set here too (single OKX fetch for both).
       let _volatility24h = null;
       let _strategyLabel = null;
       try {
@@ -881,14 +874,25 @@ async function runSafetyChecks(name, args) {
           log("safety", `[SAFETY] Price velocity block — rapid dump detected for ${args.base_mint}: ${velocity.reason}`);
           return { pass: false, reason: velocity.reason };
         }
-        // Feature 4: block if 1h move is too large in either direction
-        if (velocity.volatility_blocked) {
-          log("safety", velocity.reason);
-          return { pass: false, reason: velocity.reason };
-        }
-        // Feature 1: adjust bins_below based on 24h price range
+        // volatility_blocked removed — price velocity covers this already
+
         const range24h = Math.abs(velocity.price_change_24h ?? velocity.price_change_1h ?? 0);
         _volatility24h = range24h;
+
+        // ── Hardcoded distribution strategy (LLM never chooses this) ──
+        let hardcodedStrategy;
+        if (range24h > 15) {
+          hardcodedStrategy = "bid_ask";
+        } else if (range24h >= 5) {
+          hardcodedStrategy = "curve";
+        } else {
+          hardcodedStrategy = "spot";
+        }
+        args.strategy = hardcodedStrategy;
+        _strategyLabel = `${hardcodedStrategy.toUpperCase().replace("_", "-")} (hardcoded, 24h vol: ${range24h.toFixed(1)}%)`;
+        log("strategy", `[STRATEGY] Hardcoded: ${hardcodedStrategy} (24h volatility: ${range24h.toFixed(1)}%)`);
+
+        // Adjust bins_below based on 24h price range
         if (range24h > 0 && args.bins_below != null) {
           const minBins = config.strategy.minBinsBelow;
           const maxBins = config.strategy.maxBinsBelow;
@@ -900,26 +904,9 @@ async function runSafetyChecks(name, args) {
           }
           targetBins = Math.max(minBins, Math.min(maxBins, targetBins));
           if (targetBins !== args.bins_below) {
-            log("strategy", `[STRATEGY] Bin range adjusted for volatility: ${range24h.toFixed(1)}% 24h range → bins_below ${args.bins_below} → ${targetBins}`);
+            log("strategy", `[STRATEGY] Bin range adjusted: ${range24h.toFixed(1)}% 24h → bins_below ${args.bins_below} → ${targetBins}`);
             args.bins_below = targetBins;
           }
-        }
-
-        // ── Fix 2: Volatility-matched distribution strategy override ──
-        if (range24h >= 10) {
-          if (args.strategy !== "bid_ask") {
-            log("strategy", `[STRATEGY] Distribution overridden to BID_ASK — 24h volatility ${range24h.toFixed(1)}%`);
-            args.strategy = "bid_ask";
-          }
-          _strategyLabel = `BID-ASK (volatility-matched, ${range24h.toFixed(1)}% 24h)`;
-        } else if (range24h >= 5) {
-          if (args.strategy !== "curve") {
-            log("strategy", `[STRATEGY] Distribution overridden to CURVE — 24h volatility ${range24h.toFixed(1)}%`);
-            args.strategy = "curve";
-          }
-          _strategyLabel = `CURVE (volatility-matched, ${range24h.toFixed(1)}% 24h)`;
-        } else {
-          _strategyLabel = `${(args.strategy || "spot").toUpperCase()} (volatility OK, ${range24h.toFixed(1)}% 24h)`;
         }
       } catch (e) {
         log("executor_warn", `Price velocity check failed for ${args.base_mint}: ${e.message}`);
