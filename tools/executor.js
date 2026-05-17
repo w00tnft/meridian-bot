@@ -805,14 +805,17 @@ async function runSafetyChecks(name, args) {
           reason: `bins_below ${args.bins_below ?? "missing"} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
         };
       }
+      // bins_above may be > 0 even for single-side SOL (upper bins are empty stubs that
+      // define the price ceiling without requiring token X). Allowing this is what makes
+      // the price centering check meaningful for single-side deploys.
       if (
         isSingleSidedSol &&
         args.upside_pct == null &&
-        (!Number.isFinite(requestedBinsAbove) || !Number.isInteger(requestedBinsAbove) || requestedBinsAbove !== 0)
+        (!Number.isFinite(requestedBinsAbove) || !Number.isInteger(requestedBinsAbove) || requestedBinsAbove < 0)
       ) {
         return {
           pass: false,
-          reason: "Single-side SOL deploy must use bins_above=0.",
+          reason: "bins_above must be a non-negative integer.",
         };
       }
 
@@ -922,32 +925,41 @@ async function runSafetyChecks(name, args) {
         log("executor_warn", `Price velocity check failed for ${args.base_mint}: ${e.message}`);
       }
 
-      // ── Fix 3: Price centering check ─────────────────────────────
-      // Only applies when bins_above > 5 (symmetric deploys).
-      // Pure single-side SOL deploys (bins_above=0) are exempt by design.
+      // ── Price centering check ─────────────────────────────────────
+      // Runs for ALL deploys including single-side SOL (bins_above=0).
+      // When bins_above=0 the active price sits at the 100th percentile
+      // of the proposed range — any upward tick immediately causes OOR.
+      // That is an "edge deployment" and is always blocked for bid_ask/spot.
       let _pricePct = null;
       const binsAboveRequested = Number(args.bins_above ?? 0);
-      if (binsAboveRequested > 5) {
-        try {
-          const activeBinData = await getActiveBin({ pool_address: args.pool_address });
-          const activeBin = activeBinData?.active_bin?.binId ?? activeBinData?.binId;
-          if (activeBin != null) {
-            const binsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? 50);
-            const totalBins = binsBelow + binsAboveRequested;
-            const pctFromBottom = totalBins > 0 ? (binsBelow / totalBins) * 100 : 50;
-            _pricePct = pctFromBottom;
-            if (pctFromBottom < 25) {
-              log("safety", `[SAFETY] Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile of range, too close to lower boundary`);
-              return { pass: false, reason: `Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile of range (below 25th). Risk of immediate OOR on any downward move.` };
-            }
-            if (pctFromBottom > 75) {
-              log("safety", `[SAFETY] Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile of range, too close to upper boundary`);
-              return { pass: false, reason: `Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile of range (above 75th). Risk of immediate OOR on any upward move.` };
-            }
-          }
-        } catch (e) {
-          log("executor_warn", `Price centering check failed: ${e.message}`);
+      const strategyForCentering = (args.strategy || config.strategy.strategy || "bid_ask").toLowerCase();
+      const binsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? 50);
+      const totalBins = binsBelow + binsAboveRequested;
+      // pctFromBottom: where the active bin sits within the proposed range (0=bottom, 100=top)
+      const pctFromBottom = totalBins > 0 ? (binsBelow / totalBins) * 100 : 100;
+
+      log("safety", `[SAFETY] Price centering: bins_below=${binsBelow} bins_above=${binsAboveRequested} percentile=${pctFromBottom.toFixed(1)}% strategy=${strategyForCentering}`);
+
+      if (binsAboveRequested === 0 && (strategyForCentering === "bid_ask" || strategyForCentering === "spot")) {
+        // Price is at 100th percentile — guaranteed OOR on any upward move
+        const msg = `[SAFETY] Price centering block — bins_above=0 with ${strategyForCentering} strategy is an edge deployment (price at ${pctFromBottom.toFixed(0)}th percentile). Any upward tick causes immediate OOR. Provide bins_above > 0 to center the range.`;
+        log("safety", msg);
+        return { pass: false, reason: msg };
+      }
+
+      if (totalBins > 0) {
+        _pricePct = pctFromBottom;
+        if (pctFromBottom < 25) {
+          const msg = `[SAFETY] Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile (bins_below=${binsBelow}, bins_above=${binsAboveRequested}). Too close to lower boundary — immediate OOR risk on downward move.`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
         }
+        if (pctFromBottom > 75) {
+          const msg = `[SAFETY] Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile (bins_below=${binsBelow}, bins_above=${binsAboveRequested}). Too close to upper boundary — immediate OOR risk on upward move.`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+        log("safety", `[SAFETY] Price centering PASS — price at ${pctFromBottom.toFixed(0)}th percentile (25th-75th allowed)`);
       }
 
       // Check amount limits
