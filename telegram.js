@@ -41,9 +41,10 @@ function usdToSol(usd) {
   return price > 0 ? (Number(usd) || 0) / price : 0;
 }
 
-// Format a SOL amount with 4 decimal places
+// Format a SOL amount — 6 decimal places for tiny amounts, 4 otherwise
 function fmtSol(sol) {
-  return `${(Number(sol) || 0).toFixed(4)} SOL`;
+  const n = Number(sol) || 0;
+  return n !== 0 && Math.abs(n) < 0.001 ? `${n.toFixed(6)} SOL` : `${n.toFixed(4)} SOL`;
 }
 
 // Format signed SOL PnL with percentage context: "+0.0072 SOL (+2.56%)"
@@ -641,7 +642,10 @@ export function buildManagementCycleHtml({ positionData = [], actionMap = new Ma
     // pnl_usd and value fields already in SOL when solMode=true
     const pnlSol = Number(p.pnl_usd) || 0;
     const pnlLine = `${fmtSolPnl(pnlSol, pnlPct)} ${pnlPct >= 0 ? "✅" : "🔴"}`;
-    const yieldStr = p.fee_per_tvl_24h != null ? `${Number(p.fee_per_tvl_24h).toFixed(2)}% APR` : "—";
+    const yieldRaw = Number(p.fee_per_tvl_24h);
+    const yieldStr = p.fee_per_tvl_24h != null
+      ? `${yieldRaw < 0.1 && yieldRaw > 0 ? yieldRaw.toFixed(4) : yieldRaw.toFixed(2)}% APR`
+      : "—";
     return [
       `🪙 ${escHtml(p.pair)}`,
       `├ 💵 Value      ${fmtSol(p.total_value_usd || 0)}`,
