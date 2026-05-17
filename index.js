@@ -31,7 +31,7 @@ import {
   buildScreeningCycleHtml,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFailedClose, getFailedCloseAttempts, clearFailedClose, pruneFailedCloses, updateMaxDrawdown } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFailedClose, getFailedCloseAttempts, clearFailedClose, pruneFailedCloses, updateMaxDrawdown, updatePeakPnl } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkPriceVelocity, checkBtcTrend } from "./tools/okx.js";
@@ -252,9 +252,25 @@ export async function runManagementCycle({ silent = false } = {}) {
     // Clean up failedCloses entries for positions that no longer exist
     pruneFailedCloses(positionData.map((p) => p.position));
 
-    // Track max drawdown for recovery exit logic
+    // Track peak PnL and max drawdown for trailing TP and recovery exit logic
     for (const p of positionData) {
-      if (p.pnl_pct != null) updateMaxDrawdown(p.position, p.pnl_pct);
+      if (p.pnl_pct != null) {
+        updatePeakPnl(p.position, p.pnl_pct);
+        updateMaxDrawdown(p.position, p.pnl_pct);
+      }
+    }
+
+    // Adaptive management interval — speed up when positions are volatile
+    {
+      const maxVol = positionData.length > 0
+        ? Math.max(...positionData.map(p => Number(p.volatility) || 0))
+        : 0;
+      const targetInterval = positionData.length === 0 ? 10 : maxVol >= 5 ? 3 : maxVol >= 2 ? 5 : 10;
+      if (targetInterval !== config.schedule.managementIntervalMin) {
+        config.schedule.managementIntervalMin = targetInterval;
+        log("cron", `[MANAGE] Adaptive interval: ${positionData.length === 0 ? "no positions" : `volatility ${maxVol.toFixed(1)}%`} → every ${targetInterval}m`);
+        if (cronStarted) startCronJobs();
+      }
     }
 
     // Price velocity emergency circuit breaker — runs before any LLM or rule check
@@ -1049,8 +1065,8 @@ function formatCandidates(candidates) {
 }
 
 // SINGLE SOURCE OF TRUTH FOR ALL EXITS — LLM never closes positions
-// Priority order: velocity > btc_downtrend > emergency_retry > exit (trailing TP) > deterministic rules below
-// Rule 1: stop loss | Rule 2: take profit | Rule 3: drawdown recovery | Rule 4: pumped above range | Rule 5: OOR | Rule 6: low yield | Rule 7: max age
+// Priority order: velocity > btc_downtrend > emergency_retry > exit (trailing TP state) > deterministic rules below
+// Rule 1: stop loss | Rule 2: take profit | Rule 3: drawdown recovery | Rule 4: trailing TP | Rule 5: pumped above range | Rule 6: OOR | Rule 7: low yield | Rule 8: max age
 function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
@@ -1092,39 +1108,57 @@ function getDeterministicCloseRule(position, managementConfig) {
     }
   }
 
-  // Rule 4: Pumped far above range
+  // Rule 4: Trailing Take Profit — exit when position has pulled back 1.5% from a peak ≥ 3%
+  if (!pnlSuspect && position.pnl_pct != null) {
+    const peakPnl = tracked?.peak_pnl ?? 0;
+    if (peakPnl >= 3) {
+      const dropFromPeak = peakPnl - position.pnl_pct;
+      if (dropFromPeak >= 1.5) {
+        log("cron", `[MANAGE] Trailing TP — peaked +${peakPnl.toFixed(2)}%, dropped ${dropFromPeak.toFixed(2)}% → closing at ${position.pnl_pct.toFixed(2)}%`);
+        return {
+          action: "CLOSE",
+          rule: 4,
+          reason: `trailing_tp: peaked +${peakPnl.toFixed(2)}%, dropped ${dropFromPeak.toFixed(2)}% from peak`,
+          peakPnl,
+          dropFromPeak,
+        };
+      }
+    }
+  }
+
+  // Rule 5: Pumped far above range
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    return { action: "CLOSE", rule: 4, reason: "pumped far above range" };
+    return { action: "CLOSE", rule: 5, reason: "pumped far above range" };
   }
 
-  // Rule 5: OOR
+  // Rule 6: OOR
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
-    return { action: "CLOSE", rule: 5, reason: "OOR" };
+    return { action: "CLOSE", rule: 6, reason: "OOR" };
   }
 
-  // Rule 6: Low yield
+  // Rule 7: Low yield
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60
   ) {
-    return { action: "CLOSE", rule: 6, reason: "low yield" };
+    return { action: "CLOSE", rule: 7, reason: "low yield" };
   }
 
-  // Rule 7: Max age
+  // Rule 8: Max age
   const effectiveMaxAgeMinutes = tracked?.maxAgeMinutes ?? (3 * 24 * 60);
   const effectiveMaxAgeDays = Math.round(effectiveMaxAgeMinutes / (24 * 60));
   if ((position.age_minutes ?? 0) >= effectiveMaxAgeMinutes) {
-    return { action: "CLOSE", rule: 7, reason: `max age reached (${effectiveMaxAgeDays} day${effectiveMaxAgeDays !== 1 ? "s" : ""})` };
+    return { action: "CLOSE", rule: 8, reason: `max age reached (${effectiveMaxAgeDays} day${effectiveMaxAgeDays !== 1 ? "s" : ""})` };
   }
 
   return null;

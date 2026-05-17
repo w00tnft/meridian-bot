@@ -580,7 +580,7 @@ export async function deployPosition({
 
   const strategyType = strategyMap[activeStrategy];
   if (strategyType === undefined) {
-    throw new Error(`Invalid strategy: ${activeStrategy}. Use spot, curve, or bid_ask.`);
+    throw new Error(`Invalid strategy: ${activeStrategy}. Use spot or bid_ask.`);
   }
 
   // Calculate amounts
