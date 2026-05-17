@@ -50,7 +50,7 @@ const isMain = entrypointPath
 if (isMain) {
   log("startup", "DLMM LP Agent starting...");
   log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
-  log("startup", `Model: ${process.env.LLM_MODEL || "deepseek/deepseek-r1"}`);
+  log("startup", `Model: ${config.llm.managementModel}`);
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
   startHiveMindBackgroundSync();

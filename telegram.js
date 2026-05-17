@@ -186,19 +186,30 @@ export async function sendHTML(html) {
   return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
 }
 
+// Track last-sent text per message_id to avoid "message is not modified" 400 errors
+const _editTextCache = new Map();
+
 export async function editMessage(text, messageId) {
   if (!TOKEN || !chatId || !messageId) return null;
+  const truncated = String(text).slice(0, 4096);
+  if (_editTextCache.get(messageId) === truncated) return null;
+  _editTextCache.set(messageId, truncated);
   return postTelegram("editMessageText", {
     message_id: messageId,
-    text: String(text).slice(0, 4096),
+    text: truncated,
   });
 }
 
 export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   if (!TOKEN || !chatId || !messageId) return null;
+  const truncated = String(text).slice(0, 4096);
+  const cacheKey = `${messageId}:btn`;
+  const payload = JSON.stringify({ text: truncated, inlineKeyboard });
+  if (_editTextCache.get(cacheKey) === payload) return null;
+  _editTextCache.set(cacheKey, payload);
   return postTelegram("editMessageText", {
     message_id: messageId,
-    text: String(text).slice(0, 4096),
+    text: truncated,
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
 }
@@ -717,7 +728,7 @@ export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletS
     priceLine,
     "",
     analysisHeader,
-    content || "No report",
+    escHtml(content || "No report"),
     SEP,
   ].filter(v => v !== null);
   return parts.join("\n");
