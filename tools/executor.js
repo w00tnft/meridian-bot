@@ -160,7 +160,7 @@ async function validateDeployPoolThresholds(args) {
 
     if (ageOk && organicOk && feeTvlOk && scoreOk && amountOk) {
       log("executor", `[SAFETY] High conviction override: ${args.pool_address} — age ${tokenAgeHours}h, score ${score}/5, organic ${organicScore}%, fee/tvl ${feeTvlRatio?.toFixed(2)} — deploying ${amountSol} SOL (reduced size)`);
-      return { pass: true, highConviction: true, tokenAgeHours, organicScore, feeTvlRatio, score, amountSol };
+      return { pass: true, highConviction: true, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
     }
 
     const failReasons = [
@@ -214,12 +214,21 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  return { pass: true };
+  return { pass: true, feeActiveTvlRatio };
 }
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
+
+// Last deploy meta — populated by runSafetyChecks on successful deploy safety pass.
+// Used by index.js to enrich the screening cycle Telegram report.
+let _lastDeployMeta = null;
+export function getLastDeployMeta() {
+  const meta = _lastDeployMeta;
+  _lastDeployMeta = null; // consume once
+  return meta;
+}
 
 function coerceBoolean(value, key) {
   if (typeof value === "boolean") return value;
@@ -724,6 +733,20 @@ async function runSafetyChecks(name, args) {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
 
+      // ── Fix 4: Minimum R:R check ─────────────────────────────
+      // Treat feeActiveTvlRatio as daily fee yield (decimal). Expected 2-day return must >= 4%.
+      const poolFeeRatio = poolThresholds.feeActiveTvlRatio;
+      const rrExpected = poolFeeRatio != null ? poolFeeRatio * 2 * 100 : null; // % over 2 days
+      const rrRisk = Math.abs(config.management.stopLossPct ?? 8);
+      if (rrExpected != null) {
+        if (rrExpected < 4) {
+          const msg = `[SAFETY] R:R FAIL — expected fees ${rrExpected.toFixed(1)}% vs risk ${rrRisk}% — skipping`;
+          log("safety", msg);
+          return { pass: false, reason: `R:R check failed: expected 2-day fees ${rrExpected.toFixed(1)}% < 4% minimum (fee/TVL ratio ${(poolFeeRatio * 100).toFixed(2)}%)` };
+        }
+        log("safety", `[SAFETY] R:R PASS — expected fees ${rrExpected.toFixed(1)}% vs risk ${rrRisk}% — deploying`);
+      }
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
@@ -846,7 +869,9 @@ async function runSafetyChecks(name, args) {
         log("executor_warn", `BTC trend check failed: ${e.message}`);
       }
 
-      // Price velocity + volatility window circuit breakers, and bin range adjustment
+      // Price velocity + volatility window circuit breakers, bin range + strategy adjustment
+      let _volatility24h = null;
+      let _strategyLabel = null;
       try {
         const velocity = await checkPriceVelocity(args.base_mint);
         if (velocity.deploy_blocked) {
@@ -860,6 +885,7 @@ async function runSafetyChecks(name, args) {
         }
         // Feature 1: adjust bins_below based on 24h price range
         const range24h = Math.abs(velocity.price_change_24h ?? velocity.price_change_1h ?? 0);
+        _volatility24h = range24h;
         if (range24h > 0 && args.bins_below != null) {
           const minBins = config.strategy.minBinsBelow;
           const maxBins = config.strategy.maxBinsBelow;
@@ -875,8 +901,53 @@ async function runSafetyChecks(name, args) {
             args.bins_below = targetBins;
           }
         }
+
+        // ── Fix 2: Volatility-matched distribution strategy override ──
+        if (range24h >= 10) {
+          if (args.strategy !== "bid_ask") {
+            log("strategy", `[STRATEGY] Distribution overridden to BID_ASK — 24h volatility ${range24h.toFixed(1)}%`);
+            args.strategy = "bid_ask";
+          }
+          _strategyLabel = `BID-ASK (volatility-matched, ${range24h.toFixed(1)}% 24h)`;
+        } else if (range24h >= 5) {
+          if (args.strategy !== "curve") {
+            log("strategy", `[STRATEGY] Distribution overridden to CURVE — 24h volatility ${range24h.toFixed(1)}%`);
+            args.strategy = "curve";
+          }
+          _strategyLabel = `CURVE (volatility-matched, ${range24h.toFixed(1)}% 24h)`;
+        } else {
+          _strategyLabel = `${(args.strategy || "spot").toUpperCase()} (volatility OK, ${range24h.toFixed(1)}% 24h)`;
+        }
       } catch (e) {
         log("executor_warn", `Price velocity check failed for ${args.base_mint}: ${e.message}`);
+      }
+
+      // ── Fix 3: Price centering check ─────────────────────────────
+      // Only applies when bins_above > 5 (symmetric deploys).
+      // Pure single-side SOL deploys (bins_above=0) are exempt by design.
+      let _pricePct = null;
+      const binsAboveRequested = Number(args.bins_above ?? 0);
+      if (binsAboveRequested > 5) {
+        try {
+          const activeBinData = await getActiveBin({ pool_address: args.pool_address });
+          const activeBin = activeBinData?.active_bin?.binId ?? activeBinData?.binId;
+          if (activeBin != null) {
+            const binsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? 50);
+            const totalBins = binsBelow + binsAboveRequested;
+            const pctFromBottom = totalBins > 0 ? (binsBelow / totalBins) * 100 : 50;
+            _pricePct = pctFromBottom;
+            if (pctFromBottom < 25) {
+              log("safety", `[SAFETY] Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile of range, too close to lower boundary`);
+              return { pass: false, reason: `Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile of range (below 25th). Risk of immediate OOR on any downward move.` };
+            }
+            if (pctFromBottom > 75) {
+              log("safety", `[SAFETY] Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile of range, too close to upper boundary`);
+              return { pass: false, reason: `Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile of range (above 75th). Risk of immediate OOR on any upward move.` };
+            }
+          }
+        } catch (e) {
+          log("executor_warn", `Price centering check failed: ${e.message}`);
+        }
       }
 
       // Check amount limits
@@ -914,6 +985,14 @@ async function runSafetyChecks(name, args) {
           };
         }
       }
+
+      // Store meta for Telegram screening report enrichment
+      _lastDeployMeta = {
+        rrExpected: rrExpected != null ? parseFloat(rrExpected.toFixed(1)) : null,
+        rrRisk,
+        strategyLabel: _strategyLabel,
+        pricePct: _pricePct != null ? parseFloat(_pricePct.toFixed(0)) : null,
+      };
 
       return { pass: true };
     }
