@@ -8,5 +8,6 @@
   "maxTvl": 400000,
   "minHolders": 250,
   "minMcap": 100000,
-  "solMode": true
+  "solMode": true,
+  "minTokenFeesSol": 10
 }
