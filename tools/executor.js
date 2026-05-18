@@ -949,7 +949,6 @@ async function runSafetyChecks(name, args) {
         log("safety", msg);
         return { pass: false, reason: msg };
       }
-      // spot with bins_above=0 is intentional — single-side SOL, all bins below price
 
       if (strategyForCentering === "spot" && binsAboveRequested === 0) {
         // spot single-side SOL: bins_above=0 is intentional — all liquidity below price, no upside exposure
