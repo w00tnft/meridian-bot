@@ -932,10 +932,7 @@ async function runSafetyChecks(name, args) {
       }
 
       // ── Price centering check ─────────────────────────────────────
-      // Runs for ALL deploys including single-side SOL (bins_above=0).
-      // When bins_above=0 the active price sits at the 100th percentile
-      // of the proposed range — any upward tick immediately causes OOR.
-      // That is an "edge deployment" and is always blocked for bid_ask/spot.
+      // Runs for ALL deploys. spot+bins_above=0 is exempted (intentional single-side SOL).
       let _pricePct = null;
       const binsAboveRequested = Number(args.bins_above ?? 0);
       const strategyForCentering = (args.strategy || config.strategy.strategy || "bid_ask").toLowerCase();
@@ -954,7 +951,11 @@ async function runSafetyChecks(name, args) {
       }
       // spot with bins_above=0 is intentional — single-side SOL, all bins below price
 
-      if (totalBins > 0) {
+      if (strategyForCentering === "spot" && binsAboveRequested === 0) {
+        // spot single-side SOL: bins_above=0 is intentional — all liquidity below price, no upside exposure
+        log("strategy", "[STRATEGY] Spot single-side SOL — centering check skipped (intentional)");
+        // continue to deploy — pctFromBottom=100% is correct for spot
+      } else if (totalBins > 0) {
         _pricePct = pctFromBottom;
         if (pctFromBottom < 25) {
           const msg = `[SAFETY] Price centering block — price at ${pctFromBottom.toFixed(0)}th percentile (bins_below=${binsBelow}, bins_above=${binsAboveRequested}). Too close to lower boundary — immediate OOR risk on downward move.`;
