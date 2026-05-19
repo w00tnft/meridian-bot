@@ -949,12 +949,20 @@ async function runSafetyChecks(name, args) {
         log("safety", msg);
         return { pass: false, reason: msg };
       }
-      // spot with bins_above=0 is intentional — single-side SOL, all bins below price
 
       if (strategyForCentering === "spot" && binsAboveRequested === 0) {
-        // spot single-side SOL: bins_above=0 is intentional — all liquidity below price, no upside exposure
-        log("strategy", "[STRATEGY] Spot single-side SOL — centering check skipped (intentional)");
-        // continue to deploy — pctFromBottom=100% is correct for spot
+        // Single-side SOL — price naturally sits near top of range.
+        // Only block if active bin is within 3 bins of upper boundary (instant OOR guaranteed).
+        const activeBin = args.active_bin || 0;
+        const upperBound = activeBin + (args.bins_below || 0);
+        const binsFromEdge = upperBound - activeBin;
+        if (binsFromEdge <= 3) {
+          const msg = `[SAFETY] Spot edge block — active bin within ${binsFromEdge} bins of upper boundary. Instant OOR guaranteed.`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+        log("strategy", `[STRATEGY] Spot single-side SOL — ${binsFromEdge} bins buffer from edge ✅`);
+        // proceed to deploy
       } else if (totalBins > 0) {
         _pricePct = pctFromBottom;
         if (pctFromBottom < 25) {
