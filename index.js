@@ -31,7 +31,8 @@ import {
   buildScreeningCycleHtml,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFailedClose, getFailedCloseAttempts, clearFailedClose, pruneFailedCloses, updateMaxDrawdown, updatePeakPnl } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFailedClose, getFailedCloseAttempts, clearFailedClose, pruneFailedCloses, updateMaxDrawdown, updatePeakPnl, getStrategyMode, setStrategyMode } from "./state.js";
+import { calculateRSI, calculateMACD, fetch15mCandles } from "./tools/indicators.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkPriceVelocity, checkBtcTrend } from "./tools/okx.js";
@@ -246,7 +247,8 @@ export async function runManagementCycle({ silent = false } = {}) {
     // Snapshot + load pool memory
     positionData = positions.map((p) => {
       recordPositionSnapshot(p.pool, p);
-      return { ...p, recall: recallForPool(p.pool) };
+      const _tracked = getTrackedPosition(p.position);
+      return { ...p, recall: recallForPool(p.pool), openedInMode: _tracked?.openedInMode ?? "conservative" };
     });
 
     // Clean up failedCloses entries for positions that no longer exist
@@ -388,7 +390,7 @@ export async function runManagementCycle({ silent = false } = {}) {
         continue;
       }
 
-      const closeRule = getDeterministicCloseRule(p, config.management);
+      const closeRule = await getDeterministicCloseRule(p, config.management);
       if (closeRule) {
         actionMap.set(p.position, closeRule);
         continue;
@@ -880,6 +882,7 @@ IMPORTANT:
             walletSol: screenWalletSol,
             deployAmount: screenDeployAmount,
             deployMeta: getLastDeployMeta(),
+            mode: getStrategyMode(),
           });
           if (liveMessage) {
             await liveMessage.finalize("✅ Done").catch(() => {});
@@ -971,7 +974,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
-        const closeRule = getDeterministicCloseRule(p, config.management);
+        const closeRule = await getDeterministicCloseRule(p, config.management);
         if (closeRule) {
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
@@ -1066,9 +1069,45 @@ function formatCandidates(candidates) {
 
 // SINGLE SOURCE OF TRUTH FOR ALL EXITS — LLM never closes positions
 // Priority order: velocity > btc_downtrend > emergency_retry > exit (trailing TP state) > deterministic rules below
+// Dump catch: RSI(2)>90 + MACD firstGreenBar → exit; -35% hard SL; OOR above closes; skips conservative rules
 // Rule 1: stop loss | Rule 2: take profit | Rule 3: drawdown recovery | Rule 4: trailing TP | Rule 5: pumped above range | Rule 6: OOR | Rule 7: low yield | Rule 8: max age
-function getDeterministicCloseRule(position, managementConfig) {
+async function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
+
+  // ── Dump catch exits (apply when position was opened in dump catch mode) ──
+  const openedInMode = tracked?.openedInMode ?? "conservative";
+  if (openedInMode === "dumpcatch") {
+    // Hard stop loss: -35% (much wider than conservative -8%)
+    if (!Number.isNaN(position.pnl_pct) && position.pnl_pct != null && position.pnl_pct <= -35) {
+      return { action: "CLOSE", rule: "DC_SL", reason: "dump catch hard stop loss (-35%)" };
+    }
+
+    // OOR above range: token pumped far past our range — still exit
+    if (
+      position.active_bin != null &&
+      position.upper_bin != null &&
+      position.active_bin > position.upper_bin + (managementConfig.outOfRangeBinsToClose ?? 5)
+    ) {
+      return { action: "CLOSE", rule: "DC_OOR_ABOVE", reason: "dump catch: pumped far above range" };
+    }
+
+    // Bounce confirmed exit: RSI(2) > 90 AND MACD first green bar
+    const _dcSymbol = position.pair?.split("-")[0] ?? position.token_symbol;
+    if (_dcSymbol) {
+      const _dcCandles = await fetch15mCandles(_dcSymbol, 60).catch(() => null);
+      if (_dcCandles && _dcCandles.length >= 30) {
+        const _dcRsi = calculateRSI(_dcCandles, 2);
+        const _dcMacd = calculateMACD(_dcCandles);
+        if (_dcRsi?.overbought && _dcMacd?.firstGreenBar) {
+          log("cron", `[DUMP CATCH] Bounce confirmed exit — RSI(2)=${_dcRsi.value.toFixed(1)} overbought, MACD first green bar`);
+          return { action: "CLOSE", rule: "DC_BOUNCE", reason: `dump catch bounce confirmed: RSI(2)=${_dcRsi.value.toFixed(1)}, MACD first green bar` };
+        }
+      }
+    }
+
+    // For dump catch positions, skip ALL conservative exit rules
+    return null;
+  }
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
     if (position.pnl_pct > -90) return false;
@@ -1624,6 +1663,45 @@ async function telegramHandler(msg) {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
+
+  if (text === "/mode" || text === "/mode conservative" || text === "/mode dumpcatch") {
+    const currentMode = getStrategyMode();
+    if (text === "/mode") {
+      const modeLabel = currentMode === "dumpcatch" ? "⚡ DUMP CATCH" : "🛡️ CONSERVATIVE";
+      await sendMessage(
+        `🎯 <b>Current Strategy Mode: ${modeLabel}</b>\n\n` +
+        (currentMode === "conservative"
+          ? `Conservative mode: standard LP screening with bin centering and -8% stop loss.\n\nSwitch: /mode dumpcatch`
+          : `Dump Catch mode (Evil Panda): entries only on Supertrend bullish flip within 5 candles. -35% SL. Exit on RSI(2)>90 + MACD green bar.\n\nSwitch: /mode conservative`),
+        "HTML"
+      ).catch(() => {});
+      return;
+    }
+    const targetMode = text === "/mode conservative" ? "conservative" : "dumpcatch";
+    if (targetMode === currentMode) {
+      await sendMessage(`Already in ${targetMode} mode.`).catch(() => {});
+      return;
+    }
+    if (targetMode === "dumpcatch") {
+      await sendMessage(
+        `⚠️ <b>Switching to DUMP CATCH mode</b>\n\nEntries require:\n• Supertrend bullish flip ≤5 candles ago\n• Volume ≥$1M, MC ≥$250k\n• No entries 22:00–06:00 UTC\n• Bins sized by Fib level position\n• Stop loss: -35%\n\nExisting conservative positions keep their own exit rules.\n\nConfirm: /mode dumpcatch confirm`,
+        "HTML"
+      ).catch(() => {});
+      return;
+    }
+    if (text === "/mode conservative") {
+      setStrategyMode("conservative");
+      await sendMessage(`✅ Switched to 🛡️ CONSERVATIVE mode. New positions will use standard screening and -8% stop loss.`).catch(() => {});
+      return;
+    }
+  }
+
+  if (text === "/mode dumpcatch confirm") {
+    setStrategyMode("dumpcatch");
+    await sendMessage(`✅ Switched to ⚡ DUMP CATCH mode (Evil Panda). Next screening cycle will apply dump catch entry rules.`).catch(() => {});
+    return;
+  }
+
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);

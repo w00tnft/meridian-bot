@@ -31,13 +31,13 @@ const RE_ENTRY_COOLDOWN_HOURS = 4;
 
 function load() {
   if (!fs.existsSync(STATE_FILE)) {
-    return { positions: {}, recentEvents: [], recentlyClosedTokens: {}, lastUpdated: null };
+    return { positions: {}, recentEvents: [], recentlyClosedTokens: {}, lastUpdated: null, strategyMode: "conservative", modeChangedAt: null };
   }
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   } catch (err) {
     log("state_error", `Failed to read state.json: ${err.message}`);
-    return { positions: {}, lastUpdated: null };
+    return { positions: {}, lastUpdated: null, strategyMode: "conservative", modeChangedAt: null };
   }
 }
 
@@ -109,6 +109,7 @@ export function trackPosition({
     confirmed_trailing_exit_reason: null,
     confirmed_trailing_exit_until: null,
     trailing_active: false,
+    openedInMode: state.strategyMode || "conservative",
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
   save(state);
@@ -392,6 +393,19 @@ export function updatePeakPnl(position_address, currentPnlPct) {
     pos.peak_pnl = pnl;
     save(state);
   }
+}
+
+export function getStrategyMode() {
+  const state = load();
+  return state.strategyMode || "conservative";
+}
+
+export function setStrategyMode(mode) {
+  const state = load();
+  state.strategyMode = mode;
+  state.modeChangedAt = Date.now();
+  save(state);
+  log("state", `Strategy mode set to: ${mode}`);
 }
 
 /**

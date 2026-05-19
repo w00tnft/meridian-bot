@@ -13,7 +13,8 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction, recordClosedToken, isTokenOnCooldown, setPositionHighConvictionFlags } from "../state.js";
+import { setPositionInstruction, recordClosedToken, isTokenOnCooldown, setPositionHighConvictionFlags, getStrategyMode, getTrackedPosition } from "../state.js";
+import { calculateSupertrend, calculateFibLevels, selectBinsBySupertrendPosition, fetch15mCandles } from "./indicators.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -43,7 +44,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap, notifyHighConviction } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, notifyHighConviction, notifyDumpCatchEntry, notifyDumpCatchExit, notifyDumpCatchSL } from "../telegram.js";
 
 function numberOrNull(value) {
   const n = Number(value);
@@ -666,11 +667,28 @@ export async function executeTool(name, args) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        if (getStrategyMode() === "dumpcatch" && safetyCheck?._dcSupertrend) {
+          notifyDumpCatchEntry({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, bins: args.bins_below, fibLevel: safetyCheck._dcFibLevel ?? "—", supertrendFlip: safetyCheck._dcSupertrend.candlesSinceFlip }).catch(() => {});
+        }
         if (safetyCheck?.highConviction && result.position) {
           notifyHighConviction({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), ageHours: safetyCheck.tokenAgeHours, score: safetyCheck.score, organic: safetyCheck.organicScore, feeTvlRatio: safetyCheck.feeTvlRatio, amountSol: args.amount_y ?? args.amount_sol ?? 0, hcTier: safetyCheck.hcTier ?? 1, tierWindow: safetyCheck.tierWindow }).catch(() => {});
         }
       } else if (name === "close_position") {
-        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0, feesUsd: result.fees_usd ?? null, reason: args.reason ?? null, heldMinutes: result.minutes_held ?? null }).catch(() => {});
+        const _closedTracked = result.position ? getTrackedPosition(result.position) : null;
+        const _closedMode = _closedTracked?.openedInMode ?? "conservative";
+        const _closeReason = args.reason ?? "";
+        if (_closedMode === "dumpcatch") {
+          if (_closeReason.includes("DC_SL") || _closeReason.includes("hard stop")) {
+            notifyDumpCatchSL({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlPct: result.pnl_pct ?? 0, pnlSol: result.pnl_usd ?? 0, heldMinutes: result.minutes_held ?? null }).catch(() => {});
+          } else if (_closeReason.includes("DC_BOUNCE") || _closeReason.includes("bounce confirmed")) {
+            const _dcRsiVal = _closeReason.match(/RSI\(2\)=([\d.]+)/)?.[1];
+            notifyDumpCatchExit({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlPct: result.pnl_pct ?? 0, pnlSol: result.pnl_usd ?? 0, rsi: _dcRsiVal ?? 0, heldMinutes: result.minutes_held ?? null }).catch(() => {});
+          } else {
+            notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0, feesUsd: result.fees_usd ?? null, reason: _closeReason || null, heldMinutes: result.minutes_held ?? null }).catch(() => {});
+          }
+        } else {
+          notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0, feesUsd: result.fees_usd ?? null, reason: _closeReason || null, heldMinutes: result.minutes_held ?? null }).catch(() => {});
+        }
         if (result.base_mint) recordClosedToken(result.base_mint, args.reason ?? null);
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
@@ -931,9 +949,92 @@ async function runSafetyChecks(name, args) {
         log("executor_warn", `Price velocity check failed for ${args.base_mint}: ${e.message}`);
       }
 
+      // ── Dump Catch Mode checks ────────────────────────────────────
+      const _dcStrategyMode = getStrategyMode();
+      let _dcSupertrend = null;
+      let _dcBinSelection = null;
+      if (_dcStrategyMode === "dumpcatch") {
+        // 1. Time filter: block entries 22:00–06:00 UTC
+        const _dcHour = new Date().getUTCHours();
+        if (_dcHour >= 22 || _dcHour < 6) {
+          const msg = `[DUMP CATCH] Entry blocked — outside trading hours (${_dcHour}:00 UTC). No entries 22:00–06:00 UTC.`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+
+        // 2. Higher volume requirement
+        const _dcVolume = args.volume_usd ?? args.volume ?? 0;
+        if (_dcVolume < 1_000_000) {
+          const msg = `[DUMP CATCH] Entry blocked — volume $${(_dcVolume/1000).toFixed(0)}k below $1M minimum for dump catch mode.`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+
+        // 3. Higher MC requirement
+        const _dcMcap = args.market_cap ?? args.mcap ?? 0;
+        if (_dcMcap < 250_000) {
+          const msg = `[DUMP CATCH] Entry blocked — market cap $${(_dcMcap/1000).toFixed(0)}k below $250k minimum for dump catch mode.`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+
+        // 4. Fetch 15m candles and calculate Supertrend
+        const _dcSymbol = args.token_symbol ?? args.symbol ?? args.base_mint;
+        const _dcCandles = await fetch15mCandles(_dcSymbol, 100);
+        if (!_dcCandles || _dcCandles.length < 30) {
+          const msg = `[DUMP CATCH] Entry blocked — insufficient 15m candle data for ${_dcSymbol} (token may not be listed on OKX spot).`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+
+        // 5. Require bullish Supertrend that flipped within last 5 candles
+        _dcSupertrend = calculateSupertrend(_dcCandles, 10, 3);
+        if (!_dcSupertrend) {
+          const msg = `[DUMP CATCH] Entry blocked — could not calculate Supertrend (insufficient candles).`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+        if (_dcSupertrend.trend !== "bullish") {
+          const msg = `[DUMP CATCH] Entry blocked — Supertrend is bearish. Waiting for bullish flip before entry.`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+        if (_dcSupertrend.candlesSinceFlip > 5) {
+          const msg = `[DUMP CATCH] Entry blocked — Supertrend flipped ${_dcSupertrend.candlesSinceFlip} candles ago (max 5). Bounce window has passed.`;
+          log("safety", msg);
+          return { pass: false, reason: msg };
+        }
+        log("safety", `[DUMP CATCH] Supertrend bullish ✅ — flipped ${_dcSupertrend.candlesSinceFlip} candle(s) ago, value=${_dcSupertrend.value?.toFixed(6)}`);
+
+        // 6. Calculate ATH from candle data and derive Fib levels
+        const _dcAth = Math.max(..._dcCandles.map(c => c.high));
+        const _dcFibLevels = calculateFibLevels(_dcAth);
+        log("safety", `[DUMP CATCH] ATH=${_dcAth.toFixed(6)} Fib100bins=${_dcFibLevels.level_100bins.toFixed(6)} Fib125bins=${_dcFibLevels.level_125bins.toFixed(6)}`);
+
+        // 7. Select bin count based on Supertrend position vs Fib levels
+        _dcBinSelection = selectBinsBySupertrendPosition(_dcSupertrend.value, _dcFibLevels);
+        log("safety", `[DUMP CATCH] Bin selection: ${_dcBinSelection.bins} bins (${_dcBinSelection.rangeDesc})`);
+
+        // 8. Override deployment settings for dump catch
+        args.bins_below = _dcBinSelection.bins;
+        args.bins_above = 0;
+        args.strategy = "spot";
+        log("safety", `[DUMP CATCH] Overriding deploy: bins_below=${args.bins_below}, bins_above=0, strategy=spot`);
+
+        // 9. Skip normal centering check (dump catch uses fib-based bin sizing, not symmetry)
+        // Mark with a flag so centering check below is bypassed
+        args._skipCenteringCheck = true;
+      }
+
       // ── Price centering check ─────────────────────────────────────
       // Runs for ALL deploys. spot+bins_above=0 is exempted (intentional single-side SOL).
+      // Dump catch mode sets _skipCenteringCheck=true (fib-based sizing, no symmetry needed).
       let _pricePct = null;
+      if (args._skipCenteringCheck) {
+        log("safety", "[SAFETY] Price centering skipped — dump catch mode (fib-based bin sizing)");
+        delete args._skipCenteringCheck;
+        // fall through to deploy
+      } else {
       const binsAboveRequested = Number(args.bins_above ?? 0);
       const strategyForCentering = (args.strategy || config.strategy.strategy || "bid_ask").toLowerCase();
       const binsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? 50);
@@ -977,6 +1078,7 @@ async function runSafetyChecks(name, args) {
         }
         log("safety", `[SAFETY] Price centering PASS — price at ${pctFromBottom.toFixed(0)}th percentile (25th-75th allowed)`);
       }
+      } // end else (_skipCenteringCheck)
 
       // Check amount limits
       const amountY = deployAmountY;
@@ -1022,7 +1124,9 @@ async function runSafetyChecks(name, args) {
         pricePct: _pricePct != null ? parseFloat(_pricePct.toFixed(0)) : null,
       };
 
-      return { pass: true };
+      // Pass dump catch indicator data through for deploy notification
+      const _dcPassthrough = _dcStrategyMode === "dumpcatch" ? { _dcSupertrend: _dcSupertrend ?? null, _dcFibLevel: _dcBinSelection?.rangeDesc ?? null } : {};
+      return { pass: true, ..._dcPassthrough };
     }
 
     case "swap_token": {

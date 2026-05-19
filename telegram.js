@@ -675,6 +675,56 @@ Been OOR for ${fmtAge(minutesOOR)}`
   );
 }
 
+export async function notifyDumpCatchEntry({ pair, amountSol, bins, fibLevel, supertrendFlip, rsi = null }) {
+  if (!isEnabled()) return;
+  const lines = [
+    "╔══════════════════════════╗",
+    "║  🐼 DUMP CATCH ENTRY  ║",
+    "╚══════════════════════════╝",
+    `🪙 <b>${escHtml(pair)}</b>`,
+    `💰 Deployed      ${Number(amountSol).toFixed(3)} SOL`,
+    `📊 Bin range     ${bins} bins (Fib: ${escHtml(fibLevel)})`,
+    `📈 ST flip       ${supertrendFlip} candle(s) ago`,
+    rsi != null ? `📉 RSI(2)        ${Number(rsi).toFixed(1)}` : null,
+    `⚠️ SL            -35% (Evil Panda)`,
+    SEP,
+  ].filter(v => v !== null);
+  return sendHTML(lines.join("\n")).catch(() => {});
+}
+
+export async function notifyDumpCatchExit({ pair, pnlPct, pnlSol, rsi, heldMinutes = null }) {
+  if (!isEnabled()) return;
+  const pnlSign = pnlPct >= 0 ? "+" : "";
+  const lines = [
+    "╔══════════════════════════╗",
+    "║  🐼 DUMP CATCH EXIT   ║",
+    "╚══════════════════════════╝",
+    `🪙 <b>${escHtml(pair)}</b>`,
+    `📈 PnL           ${pnlSign}${Number(pnlPct).toFixed(2)}% (${pnlSign}${Number(pnlSol).toFixed(4)} SOL)`,
+    `📉 RSI(2)        ${Number(rsi).toFixed(1)} — OVERBOUGHT ✅`,
+    `📊 MACD          First green bar ✅`,
+    heldMinutes != null ? `⏱️ Held          ${fmtAge(heldMinutes)}` : null,
+    `🎯 Bounce confirmed — closed into strength`,
+    SEP,
+  ].filter(v => v !== null);
+  return sendHTML(lines.join("\n")).catch(() => {});
+}
+
+export async function notifyDumpCatchSL({ pair, pnlPct, pnlSol, heldMinutes = null }) {
+  if (!isEnabled()) return;
+  const lines = [
+    "╔══════════════════════════╗",
+    "║  🐼 DUMP CATCH STOP   ║",
+    "╚══════════════════════════╝",
+    `🪙 <b>${escHtml(pair)}</b>`,
+    `🔴 PnL           ${Number(pnlPct).toFixed(2)}% (${Number(pnlSol).toFixed(4)} SOL)`,
+    `⛔ Hard stop loss hit (-35%)`,
+    heldMinutes != null ? `⏱️ Held          ${fmtAge(heldMinutes)}` : null,
+    SEP,
+  ].filter(v => v !== null);
+  return sendHTML(lines.join("\n")).catch(() => {});
+}
+
 export async function notifyHighConviction({ pair, ageHours, score, organic, feeTvlRatio, amountSol, hcTier = 1, tierWindow = null }) {
   if (hasActiveLiveMessage()) return;
   const now = new Date();
@@ -719,8 +769,9 @@ export function buildManagementCycleHtml({ positionData = [], actionMap = new Ma
     const yieldStr = p.fee_per_tvl_24h != null
       ? `${yieldRaw < 0.1 && yieldRaw > 0 ? yieldRaw.toFixed(4) : yieldRaw.toFixed(2)}% APR`
       : "—";
+    const modeTag = p.openedInMode === "dumpcatch" ? " [🐼 DC]" : " [🛡️ CON]";
     return [
-      `🪙 ${escHtml(p.pair)}`,
+      `🪙 ${escHtml(p.pair)}${modeTag}`,
       `├ 💵 Value      ${fmtSol(p.total_value_usd || 0)}`,
       `├ 💎 Unclaimed  ${fmtSol(p.unclaimed_fees_usd || 0)}`,
       `├ 📈 PnL        ${pnlLine}`,
@@ -766,11 +817,12 @@ export function buildManagementCycleHtml({ positionData = [], actionMap = new Ma
   ].join("\n");
 }
 
-export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletSol = null, deployAmount = null, deployMeta = null }) {
+export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletSol = null, deployAmount = null, deployMeta = null, mode = "conservative" }) {
   const timeStr = fmtUtcTime();
   const btcLabel = btcCheck?.downtrend
     ? `⚠️  ${btcCheck.btc_change_4h != null ? btcCheck.btc_change_4h.toFixed(1) + "% 4h" : "Downtrend"}`
     : "✅ Neutral";
+  const modeLabel = mode === "dumpcatch" ? "⚡ DUMP CATCH" : "🛡️ Conservative";
   const isHighConviction = /HIGH CONVICTION/i.test(content);
   const analysisHeader = isHighConviction ? "━━━ ⚡ AI ANALYSIS ━━━" : "━━━ 🤖 AI ANALYSIS ━━━";
 
@@ -802,6 +854,7 @@ export function buildScreeningCycleHtml({ content = "", btcCheck = null, walletS
     "╚═══════════════════════╝",
     `⏰ ${timeStr}`,
     "",
+    `🎯 Mode          ${modeLabel}`,
     `${btcCheck?.downtrend ? "⚠️" : "✅"} BTC Trend    ${btcLabel}`,
     walletSol  != null ? `✅ Wallet       ${Number(walletSol).toFixed(3)} SOL`  : null,
     deployAmount != null ? `📊 Deploy       ${deployAmount} SOL`                : null,
