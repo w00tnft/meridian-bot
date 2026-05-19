@@ -7,7 +7,7 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { log } from "../logger.js";
-import { config, setCachedSolPrice } from "../config.js";
+import { config, setCachedSolPrice, getCachedSolPrice } from "../config.js";
 
 let _connection = null;
 let _wallet = null;
@@ -52,6 +52,42 @@ function getJupiterReferralParams() {
   return { referralAccount, referralFee: Math.round(referralFee) };
 }
 
+const PUBLIC_RPC = "https://api.mainnet-beta.solana.com";
+
+async function getSolBalanceFromRpc(walletAddress) {
+  try {
+    const res = await fetch(PUBLIC_RPC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "getBalance",
+        params: [walletAddress, { commitment: "confirmed" }],
+      }),
+    });
+    if (!res.ok) throw new Error(`RPC error: ${res.status}`);
+    const json = await res.json();
+    if (json.error) throw new Error(`RPC error: ${json.error.message}`);
+    const lamports = json.result?.value ?? 0;
+    const sol = Math.round((lamports / 1e9) * 1e6) / 1e6;
+    const solPrice = getCachedSolPrice();
+    const solUsd = Math.round(sol * solPrice * 100) / 100;
+    log("wallet", `Fallback RPC balance: ${sol} SOL ($${solUsd})`);
+    return {
+      wallet: walletAddress,
+      sol,
+      sol_price: solPrice,
+      sol_usd: solUsd,
+      usdc: 0,
+      tokens: [],
+      total_usd: solUsd,
+      fallback: true,
+    };
+  } catch (err) {
+    log("wallet_error", `Fallback RPC also failed: ${err.message}`);
+    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: err.message };
+  }
+}
+
 /**
  * Get current wallet balances: SOL, USDC, and all SPL tokens using Helius Wallet API.
  * Returns USD-denominated values provided by Helius.
@@ -74,6 +110,10 @@ export async function getWalletBalances() {
     const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
     const res = await fetch(url);
     
+    if (res.status === 429) {
+      log("wallet_warn", "Helius rate-limited (429) — falling back to public Solana RPC for SOL balance");
+      return await getSolBalanceFromRpc(walletAddress);
+    }
     if (!res.ok) {
       throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
     }
