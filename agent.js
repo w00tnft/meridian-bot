@@ -236,6 +236,18 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
+          // Log full provider error details for diagnosis
+          const errStatus = error?.status ?? error?.code ?? "?";
+          const errBody = error?.error ? JSON.stringify(error.error).slice(0, 400) : null;
+          const errMsg = error?.message ?? String(error);
+          log("agent_error", `Provider error ${errStatus} (attempt ${attempt + 1}/3): ${errMsg}${errBody ? ` — body: ${errBody}` : ""}`);
+          // Retry on 400 once (transient DeepSeek/provider rejections) before giving up
+          if (error?.status === 400 && attempt < 1) {
+            const wait = 3000;
+            log("agent", `Provider 400 — retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+            await new Promise((r) => setTimeout(r, wait));
+            continue;
+          }
           throw error;
         }
         if (response.choices?.length) break;
