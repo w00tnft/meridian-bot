@@ -934,8 +934,16 @@ async function runSafetyChecks(name, args) {
 
         // DEPLOYMENT MODE: spot = single-side SOL only
         if (hardcodedStrategy === "spot") {
-          args.bins_above = 0;
-          log("strategy", "[STRATEGY] Spot: single-side SOL — zero token exposure, all bins below price");
+          // Spot needs an upside buffer — at least 30% of bins_below so a pump doesn't cause instant OOR.
+          // The bins above are empty (no token X), they just set the upper range boundary.
+          const binsBelow = Number(args.bins_below ?? config.strategy.minBinsBelow);
+          const minBinsAbove = Math.floor(binsBelow * 0.30);
+          const currentBinsAbove = Number(args.bins_above ?? 0);
+          if (currentBinsAbove < minBinsAbove) {
+            args.bins_above = minBinsAbove;
+            log("strategy", `[SAFETY_AUTOCORRECT] spot bins_above too low (was ${currentBinsAbove}) — set to 30% of bins_below (${minBinsAbove})`);
+          }
+          log("strategy", `[STRATEGY] Spot: single-side SOL — bins_below=${binsBelow} bins_above=${args.bins_above}`);
         } else {
           // bid_ask must be balanced — bins_above must equal bins_below
           // LLM prompts say bins_above=0 for single-side SOL, so auto-correct here
@@ -1082,6 +1090,12 @@ async function runSafetyChecks(name, args) {
         }
         log("strategy", `[STRATEGY] Spot single-side SOL — ${binsFromEdge} bins buffer from edge ✅`);
         // proceed to deploy
+      } else if (strategyForCentering === "spot" && binsAboveRequested < Math.floor(binsBelow * 0.20)) {
+        // Lopsided spot range — bins_above is less than 20% of bins_below after autocorrect.
+        // This means price is too close to the top and any pump causes immediate OOR.
+        const msg = `[SAFETY] Spot range too lopsided — bins_above ${binsAboveRequested} is less than 20% of bins_below ${binsBelow}. Deploy would cause immediate OOR on any upward move.`;
+        log("safety", msg);
+        return { pass: false, reason: msg };
       } else if (totalBins > 0) {
         _pricePct = pctFromBottom;
         if (pctFromBottom < 25) {
