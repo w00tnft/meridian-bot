@@ -22,6 +22,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
+import { getJupiterPrice, getSwapQuote } from "./jupiter.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
@@ -701,6 +702,16 @@ export async function executeTool(name, args) {
             const balances = await getWalletBalances({});
             const token = balances.tokens?.find(t => t.mint === result.base_mint);
             if (token && token.usd >= 0.10) {
+              // Log Jupiter exit quote for observation before swapping
+              try {
+                const quote = await getSwapQuote({ inputMint: result.base_mint, outputMint: "So11111111111111111111111111111111111111112", amount: token.balance });
+                if (quote) {
+                  const outSol = quote.outAmount ? (parseInt(quote.outAmount) / 1e9).toFixed(4) : "?";
+                  log("executor", `[JUPITER_EXIT_QUOTE] ${token.symbol || result.base_mint.slice(0, 8)} $${token.usd.toFixed(2)} → ~${outSol} SOL (priceImpact: ${quote.priceImpactPct ?? "?"}%)`);
+                }
+              } catch (qe) {
+                log("executor_warn", `[JUPITER_ERROR] Exit quote failed: ${qe.message}`);
+              }
               log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
               const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
               // Tell the model the swap already happened so it doesn't call swap_token again
@@ -1113,6 +1124,29 @@ async function runSafetyChecks(name, args) {
             pass: false,
             reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
           };
+        }
+      }
+
+      // ── Jupiter price divergence check ────────────────────────
+      // Compare Jupiter spot price vs the OKX price already fetched during velocity check.
+      // If divergence > 2%, log a warning and block the deploy.
+      if (args.base_mint && args.okx_price != null) {
+        try {
+          const jup = await getJupiterPrice(args.base_mint);
+          if (jup?.price != null) {
+            const okxPrice = Number(args.okx_price);
+            if (Number.isFinite(okxPrice) && okxPrice > 0) {
+              const pctDiff = Math.abs((jup.price - okxPrice) / okxPrice) * 100;
+              if (pctDiff > 2) {
+                const msg = `[PRICE_DIVERGENCE] Jupiter $${jup.price.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% divergence exceeds 2% threshold. Skipping deploy.`;
+                log("safety", msg);
+                return { pass: false, reason: msg };
+              }
+              log("safety", `[PRICE_DIVERGENCE] Jupiter $${jup.price.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% ✅`);
+            }
+          }
+        } catch (e) {
+          log("executor_warn", `[JUPITER_ERROR] Price divergence check failed: ${e.message}`);
         }
       }
 

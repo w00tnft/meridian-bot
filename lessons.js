@@ -83,6 +83,17 @@ function save(data) {
  * @param {string} perf.close_reason   - Why it was closed
  */
 export async function recordPerformance(perf) {
+  // Enrich with Helius on-chain data if a close tx signature is available
+  if (perf.close_txs?.length > 0) {
+    try {
+      const { getEnhancedTransaction } = await import("./tools/helius.js");
+      const onChain = await getEnhancedTransaction(perf.close_txs[0]);
+      if (onChain) perf = { ...perf, onChainData: onChain };
+    } catch (e) {
+      log("lessons_warn", `[HELIUS_ERROR] Failed to enrich lesson with on-chain data: ${e.message}`);
+    }
+  }
+
   const data = load();
 
   // Guard against unit-mixed records where a SOL-sized final value is

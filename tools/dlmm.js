@@ -86,10 +86,13 @@ const PUBLIC_FALLBACK_RPCS = [
 ];
 
 function getRpcList() {
+  const heliusKey = process.env.HELIUS_API_KEY;
+  const heliusRpc = heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : null;
   const primary = process.env.RPC_URL;
   const envFallback = process.env.FALLBACK_RPC_URL;
-  const urls = [primary];
-  if (envFallback && envFallback !== primary) urls.push(envFallback);
+  // Helius paid RPC is most reliable — put it first when available
+  const urls = heliusRpc ? [heliusRpc, primary] : [primary];
+  if (envFallback && !urls.includes(envFallback)) urls.push(envFallback);
   for (const pub of PUBLIC_FALLBACK_RPCS) {
     if (!urls.includes(pub)) urls.push(pub);
   }
@@ -1632,6 +1635,7 @@ export async function closePosition({ position_address, reason }) {
           minutes_in_range: minutesHeld - minutesOOR,
           minutes_held: minutesHeld,
           close_reason: reason || "agent decision",
+          close_txs: closeTxHashes,
         });
 
         appendDecision({
@@ -1908,6 +1912,7 @@ export async function closePosition({ position_address, reason }) {
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
+        close_txs: closeTxHashes,
       });
 
       appendDecision({
