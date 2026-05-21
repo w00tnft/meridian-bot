@@ -131,7 +131,7 @@ POOL MEMORY: Past losses or problems → strong skip signal.
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(config.strategy.minBinsBelow + (candidate volatility/5)*(config.strategy.maxBinsBelow-config.strategy.minBinsBelow)) clamped to [minBinsBelow,maxBinsBelow]. Volatility must be a positive number; 0/unknown means skip.
-- bins_above must be 0. All deploys are single-side SOL (spot strategy, no upside exposure). Never set bins_above > 0.
+- bins_above: pass 0 — the system hardcodes strategy from volatility and will auto-correct bins_above if bid_ask is selected (bid_ask requires bins_above = bins_below; spot requires bins_above = 0).
 - Use amount_y only, keep amount_x=0. Do NOT choose strategy or bin_step — the system hardcodes these from volatility data.
 - Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
 

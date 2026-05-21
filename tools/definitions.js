@@ -175,7 +175,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           bins_above: {
             type: "number",
-            description: "Number of bins above the current active bin. Keep this at 0 for single-side SOL deploys. Only use this for dual-sided or explicit upside-exposure deploys."
+            description: "Number of bins above the current active bin. For spot strategy (single-side SOL): set to 0. For bid_ask strategy (balanced): must equal bins_below — never 0. The system will auto-correct if you pass 0 with bid_ask."
           },
           downside_pct: {
             type: "number",

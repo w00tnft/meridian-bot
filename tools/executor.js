@@ -937,6 +937,13 @@ async function runSafetyChecks(name, args) {
           args.bins_above = 0;
           log("strategy", "[STRATEGY] Spot: single-side SOL — zero token exposure, all bins below price");
         } else {
+          // bid_ask must be balanced — bins_above must equal bins_below
+          // LLM prompts say bins_above=0 for single-side SOL, so auto-correct here
+          if (!args.bins_above || args.bins_above === 0) {
+            const corrected = Number(args.bins_below ?? config.strategy.minBinsBelow);
+            args.bins_above = corrected;
+            log("strategy", `[SAFETY_AUTOCORRECT] bid_ask bins_above set to match bins_below (${corrected}) — was 0`);
+          }
           log("strategy", "[STRATEGY] Bid-ask: balanced — fees both directions");
         }
 
