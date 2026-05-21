@@ -666,3 +666,13 @@ export function pruneFailedCloses(openPositionAddresses) {
   }
   if (changed) save(state);
 }
+
+// ─── Raw state access (for subsystems that embed their data in state.json) ──
+
+export function getState() {
+  return load();
+}
+
+export function saveState(newState) {
+  save(newState);
+}
