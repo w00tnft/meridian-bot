@@ -99,6 +99,16 @@ function getRpcList() {
   return urls.filter(Boolean);
 }
 
+// Log which RPC is primary at startup
+{
+  const _heliusKey = process.env.HELIUS_API_KEY;
+  if (_heliusKey) {
+    log("rpc", "[RPC] Using Helius paid RPC as primary");
+  } else {
+    log("rpc", "[RPC] Using public RPC (no Helius key)");
+  }
+}
+
 function isRpcError(err) {
   const msg = err?.message || String(err);
   return (
