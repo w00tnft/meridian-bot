@@ -136,8 +136,7 @@ HARD RULES:
 - Bin Step: Only deploy in pools with bin_step within the configured [minBinStep, maxBinStep] range (see Config in system prompt). The safety system will reject anything outside this range.
 - Volatility must be positive. If volatility is 0, null, or missing, do not deploy.
 - Range must cover at least 35 total bins. Never deploy 1-bin/tiny ranges.
-- For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
-  use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.
+- For single-side SOL deploys (amount_y only, amount_x=0): set bins_above to at least 30% of bins_below (e.g. bins_below=60 → bins_above=18). This creates an empty upside buffer so a pump doesn't cause instant OOR. Do NOT set bins_above=0 for spot — the safety system will autocorrect, but prefer to pass the right value.
 
 Guidelines (only when user hasn't specified):
 - Strategy: use the active strategy's lp_strategy field (bid_ask or spot)
@@ -175,7 +174,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           bins_above: {
             type: "number",
-            description: "Number of bins above the current active bin. For spot strategy (single-side SOL): set to 0. For bid_ask strategy (balanced): must equal bins_below — never 0. The system will auto-correct if you pass 0 with bid_ask."
+            description: "Number of bins above the current active bin. For spot strategy (single-side SOL): set to at least 30% of bins_below — creates empty upside buffer to avoid pump-OOR. For bid_ask: must equal bins_below. The system will auto-correct if too low, but prefer passing the right value."
           },
           downside_pct: {
             type: "number",
