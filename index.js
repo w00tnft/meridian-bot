@@ -853,6 +853,9 @@ IMPORTANT:
         },
       });
     screenReport = content;
+    if (!content) {
+      console.error("[SCREENING_ERROR] agentLoop returned null/empty — possible LLM error or wallet fetch hang");
+    }
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
         type: "no_deploy",
@@ -869,10 +872,12 @@ IMPORTANT:
       });
     }
   } catch (error) {
+    console.error("[SCREENING_ERROR]", error.message, error.stack);
     log("cron_error", `Screening cycle failed: ${error.message}`);
     screenReport = `Screening cycle failed: ${error.message}`;
   } finally {
     _screeningBusy = false;
+    console.log("[SCREENING_DONE] cycle complete — result:", screenReport ? "has content" : "NULL/EMPTY");
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         try {

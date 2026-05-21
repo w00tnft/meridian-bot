@@ -168,7 +168,13 @@ function isToolChoiceRequiredError(error) {
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
   const { interactive = false, onToolStart = null, onToolFinish = null } = options;
   // Build dynamic system prompt with current portfolio state
-  const [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
+  let portfolio, positions;
+  try {
+    [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
+  } catch (err) {
+    console.error("[AGENT_HANG] getWalletBalances/getMyPositions failed:", err.message, err.stack);
+    throw err;
+  }
   const stateSummary = getStateSummary();
   const lessons = getLessonsForPrompt({ agentType });
   const perfSummary = getPerformanceSummary();
