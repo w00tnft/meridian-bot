@@ -2,6 +2,21 @@ import { log } from "../logger.js";
 
 const JUPITER_PRICE_V2 = "https://api.jup.ag/price/v2";
 const JUPITER_QUOTE_V6 = "https://quote-api.jup.ag/v6/quote";
+const WSOL_MINT = "So11111111111111111111111111111111111111112";
+
+// Startup connectivity check — fire-and-forget, never throws
+(async () => {
+  try {
+    const result = await getJupiterPrice(WSOL_MINT);
+    if (result?.price != null) {
+      log("jupiter", `[JUPITER_INIT] connected ✓ SOL=$${result.price.toFixed(2)}`);
+    } else {
+      log("jupiter_warn", "[JUPITER_INIT] failed — no price returned");
+    }
+  } catch (err) {
+    log("jupiter_warn", `[JUPITER_INIT] failed — ${err.message}`);
+  }
+})();
 
 function getJupiterKey() {
   return process.env.JUPITER_API_KEY || null;
