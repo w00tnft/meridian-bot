@@ -1,5 +1,5 @@
 import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
-import { checkPriceVelocity, checkBtcTrend } from "./okx.js";
+import { checkPriceVelocity, checkBtcTrend, getPriceInfo } from "./okx.js";
 import {
   getActiveBin,
   deployPosition,
@@ -1127,26 +1127,29 @@ async function runSafetyChecks(name, args) {
         }
       }
 
-      // ── Jupiter price divergence check ────────────────────────
-      // Compare Jupiter spot price vs the OKX price already fetched during velocity check.
-      // If divergence > 2%, log a warning and block the deploy.
-      if (args.base_mint && args.okx_price != null) {
+      // ── Jupiter vs OKX price check (always runs) ─────────────
+      // Fetch both prices independently — never relies on LLM-supplied args.
+      if (args.base_mint) {
         try {
-          const jup = await getJupiterPrice(args.base_mint);
-          if (jup?.price != null) {
-            const okxPrice = Number(args.okx_price);
-            if (Number.isFinite(okxPrice) && okxPrice > 0) {
-              const pctDiff = Math.abs((jup.price - okxPrice) / okxPrice) * 100;
-              if (pctDiff > 2) {
-                const msg = `[PRICE_DIVERGENCE] Jupiter $${jup.price.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% divergence exceeds 2% threshold. Skipping deploy.`;
-                log("safety", msg);
-                return { pass: false, reason: msg };
-              }
-              log("safety", `[PRICE_DIVERGENCE] Jupiter $${jup.price.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% ✅`);
+          const [jup, okxInfo] = await Promise.all([
+            getJupiterPrice(args.base_mint),
+            getPriceInfo(args.base_mint),
+          ]);
+          const jupPrice = jup?.price;
+          const okxPrice = okxInfo?.price;
+          if (jupPrice != null && okxPrice != null && Number.isFinite(jupPrice) && Number.isFinite(okxPrice) && okxPrice > 0) {
+            const pctDiff = Math.abs((jupPrice - okxPrice) / okxPrice) * 100;
+            if (pctDiff > 2) {
+              const msg = `[PRICE_CHECK] FAIL — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% divergence exceeds 2% threshold. Skipping deploy.`;
+              log("safety", msg);
+              return { pass: false, reason: msg };
             }
+            log("safety", `[PRICE_CHECK] PASS — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% within tolerance`);
+          } else {
+            log("safety", `[PRICE_CHECK] SKIP — one or both prices unavailable (Jupiter: ${jupPrice ?? "n/a"}, OKX: ${okxPrice ?? "n/a"})`);
           }
         } catch (e) {
-          log("executor_warn", `[JUPITER_ERROR] Price divergence check failed: ${e.message}`);
+          log("executor_warn", `[PRICE_CHECK] Error during price check: ${e.message}`);
         }
       }
 
