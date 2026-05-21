@@ -5,14 +5,15 @@
  * and adjusts their weights over time. Signals that consistently appear
  * in winners get boosted; those associated with losers get decayed.
  *
- * Weights are persisted in signal-weights.json and injected into the
- * LLM prompt so the agent can prioritize the right screening criteria.
+ * Weights are stored under the `signalWeights` key in state.json so they
+ * survive Railway container restarts (state.json is on the persistent volume).
  */
 
 import fs from "fs";
 import { log } from "./logger.js";
+import { getState, saveState } from "./state.js";
 
-const WEIGHTS_FILE = "./signal-weights.json";
+const LEGACY_WEIGHTS_FILE = "./signal-weights.json";
 
 // ─── Signal Definitions ─────────────────────────────────────────
 
@@ -49,36 +50,52 @@ const CATEGORICAL_SIGNALS = new Set(["narrative_quality"]);
 
 // ─── Persistence ─────────────────────────────────────────────────
 
+const EMPTY_WEIGHTS = () => ({
+  weights: { ...DEFAULT_WEIGHTS },
+  last_recalc: null,
+  recalc_count: 0,
+  history: [],
+});
+
 function loadWeights() {
-  if (!fs.existsSync(WEIGHTS_FILE)) {
-    const initial = {
-      weights: { ...DEFAULT_WEIGHTS },
-      last_recalc: null,
-      recalc_count: 0,
-      history: [],
-    };
-    saveWeights(initial);
-    log("signal_weights", "Created signal-weights.json with default weights");
-    return initial;
+  // One-time migration: if the old standalone file exists, absorb it into state.json
+  if (fs.existsSync(LEGACY_WEIGHTS_FILE)) {
+    try {
+      const legacy = JSON.parse(fs.readFileSync(LEGACY_WEIGHTS_FILE, "utf8"));
+      const state = getState();
+      if (!state.signalWeights) {
+        state.signalWeights = legacy;
+        saveState(state);
+        log("signal_weights", "Migrated signal-weights.json into state.json");
+      }
+      fs.unlinkSync(LEGACY_WEIGHTS_FILE);
+      log("signal_weights", "Deleted legacy signal-weights.json");
+    } catch (err) {
+      log("signal_weights_error", `Migration of signal-weights.json failed: ${err.message}`);
+    }
   }
+
   try {
-    return JSON.parse(fs.readFileSync(WEIGHTS_FILE, "utf8"));
+    const state = getState();
+    if (state.signalWeights) return state.signalWeights;
+    // First run — initialise and persist so subsequent reads are fast
+    const initial = EMPTY_WEIGHTS();
+    saveWeights(initial);
+    log("signal_weights", "Initialised signal weights in state.json with defaults");
+    return initial;
   } catch (err) {
-    log("signal_weights_error", `Failed to read signal-weights.json: ${err.message}`);
-    return {
-      weights: { ...DEFAULT_WEIGHTS },
-      last_recalc: null,
-      recalc_count: 0,
-      history: [],
-    };
+    log("signal_weights_error", `Failed to load signal weights from state.json: ${err.message}`);
+    return EMPTY_WEIGHTS();
   }
 }
 
 function saveWeights(data) {
   try {
-    fs.writeFileSync(WEIGHTS_FILE, JSON.stringify(data, null, 2));
+    const state = getState();
+    state.signalWeights = data;
+    saveState(state);
   } catch (err) {
-    log("signal_weights_error", `Failed to write signal-weights.json: ${err.message}`);
+    log("signal_weights_error", `Failed to save signal weights to state.json: ${err.message}`);
   }
 }
 
