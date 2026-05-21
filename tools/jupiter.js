@@ -1,6 +1,6 @@
 import { log } from "../logger.js";
 
-const JUPITER_PRICE_V2 = "https://api.jup.ag/price/v2";
+const JUPITER_PRICE_V3 = "https://api.jup.ag/price/v3";
 const JUPITER_QUOTE_V6 = "https://quote-api.jup.ag/v6/quote";
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -24,26 +24,28 @@ function getJupiterKey() {
 
 function jupiterHeaders() {
   const key = getJupiterKey();
-  return key ? { Authorization: `Bearer ${key}` } : {};
+  // Jupiter Price API V3 uses x-api-key (not Authorization: Bearer)
+  return key ? { "x-api-key": key } : {};
 }
 
 /**
- * Fetch the current price of a token from Jupiter Price API v2.
+ * Fetch the current price of a token from Jupiter Price API V3.
  * Returns { price, mint } or null on failure.
+ * V3 response: { "<mint>": { usdPrice: number, blockId, decimals, priceChange24h } }
  */
 export async function getJupiterPrice(mintAddress) {
   if (!mintAddress) return null;
   try {
-    const url = `${JUPITER_PRICE_V2}?ids=${mintAddress}`;
+    const url = `${JUPITER_PRICE_V3}?ids=${mintAddress}`;
     const res = await fetch(url, { headers: jupiterHeaders() });
     if (!res.ok) {
       log("jupiter_warn", `[JUPITER_ERROR] getJupiterPrice ${res.status}: ${res.statusText}`);
       return null;
     }
     const data = await res.json();
-    const entry = data?.data?.[mintAddress];
-    if (!entry || entry.price == null) return null;
-    return { price: parseFloat(entry.price), mint: mintAddress };
+    const entry = data?.[mintAddress];
+    if (!entry || entry.usdPrice == null) return null;
+    return { price: parseFloat(entry.usdPrice), mint: mintAddress };
   } catch (err) {
     log("jupiter_warn", `[JUPITER_ERROR] getJupiterPrice: ${err.message}`);
     return null;
