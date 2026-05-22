@@ -6,7 +6,8 @@
   "stopLossPct": -8,
   "maxBinStep": 200,
   "maxTvl": 400000,
-  "minHolders": 250,
+  "minHolders": 200,
+  "minFeeActiveTvlRatio": 0.03,
   "minMcap": 100000,
   "solMode": true,
   "minTokenFeesSol": 10
