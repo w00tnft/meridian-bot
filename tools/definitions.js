@@ -185,7 +185,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
             description: "Optional human-friendly upside range in percent above the current active price. Do not use this for single-side SOL deploys."
           },
           pool_name: { type: "string", description: "Human-readable pool name for record-keeping" },
-          base_mint: { type: "string", description: "Base token mint address — used to prevent duplicate token exposure across pools" },
+          base_mint: { type: "string", description: "REQUIRED — always provide this. The base token mint address (not the pool address). Without this the deploy will be blocked." },
           bin_step: { type: "number", description: "Pool bin step (from discover_pools)" },
           base_fee: { type: "number", description: "Pool base fee percentage (from discover_pools)" },
           volatility: { type: "number", description: "Pool volatility at deploy time, sourced from max(screening timeframe, 30m)" },
@@ -194,7 +194,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           initial_value_usd: { type: "number", description: "Estimated USD value being deployed" },
           score: { type: "number", description: "Your screening score for this pool out of 5.0 — used for high conviction override eligibility check" }
         },
-        required: ["pool_address"]
+        required: ["pool_address", "base_mint"]
       }
     }
   },
