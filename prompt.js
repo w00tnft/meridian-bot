@@ -129,6 +129,7 @@ NARRATIVE QUALITY (your main judgment call):
 POOL MEMORY: Past losses or problems → strong skip signal.
 
 DEPLOY RULES:
+- base_mint is MANDATORY in every deploy_position call — never omit it.
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(config.strategy.minBinsBelow + (candidate volatility/5)*(config.strategy.maxBinsBelow-config.strategy.minBinsBelow)) clamped to [minBinsBelow,maxBinsBelow]. Volatility must be a positive number; 0/unknown means skip.
 - bins_above: for spot strategy, set to at least 30% of bins_below to buffer upside (e.g. bins_below=60 → bins_above≥18). For bid_ask, set equal to bins_below. The system will auto-correct if too low, but passing the right value avoids unnecessary log noise.
