@@ -915,7 +915,10 @@ export function startCronJobs() {
     await runManagementCycle();
   });
 
-  const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, runScreeningCycle);
+  const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, () => {
+    console.log('[CYCLE_TYPE] scheduled-cycle');
+    return runScreeningCycle();
+  });
 
   const healthTask = cron.schedule(`0 * * * *`, async () => {
     if (_managementBusy) return;
@@ -2406,6 +2409,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   startPolling(telegramHandler);
   (async () => {
     try {
+      console.log('[CYCLE_TYPE] startup-cycle');
       await runScreeningCycle({ silent: false });
     } catch (e) {
       log("startup_error", e.message);
