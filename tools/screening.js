@@ -104,14 +104,17 @@ function getRawPoolScreeningRejectReason(pool, s) {
 
   if (mcap == null || mcap < s.minMcap) return `mcap ${mcap ?? "unknown"} below minMcap ${s.minMcap}`;
   if (mcap > s.maxMcap) return `mcap ${mcap} above maxMcap ${s.maxMcap}`;
-  if (holders == null || holders < s.minHolders) return `holders ${holders ?? "unknown"} below minHolders ${s.minHolders}`;
+  // Discord signal fast-track: relax holders to 100 and feeActiveTvlRatio to 0.01
+  const effectiveMinHolders = (pool?.discord_signal && s.useDiscordSignals) ? 100 : s.minHolders;
+  if (holders == null || holders < effectiveMinHolders) return `holders ${holders ?? "unknown"} below ${pool?.discord_signal && s.useDiscordSignals ? "Discord fast-track minimum 100" : `minHolders ${s.minHolders}`}`;
   if (volume == null || volume < s.minVolume) return `volume ${volume ?? "unknown"} below minVolume ${s.minVolume}`;
   if (tvl == null || tvl < s.minTvl) return `TVL ${tvl ?? "unknown"} below minTvl ${s.minTvl}`;
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
   if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;
-  if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
-    return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
+  const effectiveMinFeeRatio = (pool?.discord_signal && s.useDiscordSignals) ? 0.01 : s.minFeeActiveTvlRatio;
+  if (feeActiveTvlRatio == null || feeActiveTvlRatio < effectiveMinFeeRatio) {
+    return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below ${pool?.discord_signal && s.useDiscordSignals ? "Discord fast-track minimum 0.01" : `minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`}`;
   }
   if (!isUsableVolatility(volatility)) {
     return `volatility ${volatility ?? "unknown"} is unusable`;

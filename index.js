@@ -662,10 +662,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
         return false;
       }
       const botPct = ti?.audit?.bot_holders_pct;
-      const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
-        log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
-        filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
+      // Discord signal fast-track: relax bot holder max from configured% → 40%
+      const effectiveMaxBotPct = (pool.discord_signal && config.screening.useDiscordSignals)
+        ? 40
+        : config.screening.maxBotHoldersPct;
+      if (botPct != null && effectiveMaxBotPct != null && botPct > effectiveMaxBotPct) {
+        if (pool.discord_signal) console.log(`[DISCORD_SIGNAL] Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > Discord fast-track 40%`);
+        log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${effectiveMaxBotPct}%`);
+        filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${effectiveMaxBotPct}%` });
         return false;
       }
       return true;
@@ -1116,6 +1120,70 @@ async function getDeterministicCloseRule(position, managementConfig) {
     // For dump catch positions, skip ALL conservative exit rules
     return null;
   }
+
+  // ── Discord signal tighter exit rules ─────────────────────────────────────
+  // Applied when position was opened via Discord signal fast-track.
+  // Tighter than conservative: SL -5%, trailing TP ≥5%/2%, max age 24h.
+  if (tracked?.isDiscordSignal && config.screening.useDiscordSignals) {
+    const pnlSuspectDs = position.pnl_pct != null && position.pnl_pct <= -90 &&
+      tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01;
+
+    // Stop loss: -5%
+    if (!pnlSuspectDs && position.pnl_pct != null && position.pnl_pct <= -5) {
+      console.log(`[DISCORD_SIGNAL] Stop loss hit: ${position.pair} at ${position.pnl_pct}% (DS SL -5%)`);
+      return { action: "CLOSE", rule: "DS_SL", reason: "discord signal stop loss (-5%)" };
+    }
+
+    // Pumped far above range (same as conservative)
+    if (
+      position.active_bin != null &&
+      position.upper_bin != null &&
+      position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
+    ) {
+      return { action: "CLOSE", rule: 5, reason: "pumped far above range" };
+    }
+
+    // OOR (same timing as conservative)
+    if (
+      position.active_bin != null &&
+      position.upper_bin != null &&
+      position.active_bin > position.upper_bin &&
+      (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
+    ) {
+      return { action: "CLOSE", rule: 6, reason: "OOR" };
+    }
+
+    // Trailing TP: peaked ≥5% then drops 2% from peak
+    if (!pnlSuspectDs && position.pnl_pct != null) {
+      const peakPnl = tracked?.peak_pnl ?? 0;
+      if (peakPnl >= 5) {
+        const dropFromPeak = peakPnl - position.pnl_pct;
+        if (dropFromPeak >= 2) {
+          console.log(`[DISCORD_SIGNAL] Trailing TP: ${position.pair} peaked +${peakPnl.toFixed(2)}%, dropped ${dropFromPeak.toFixed(2)}%`);
+          return { action: "CLOSE", rule: "DS_TRAILING_TP", reason: `discord signal trailing TP: peaked +${peakPnl.toFixed(2)}%, dropped ${dropFromPeak.toFixed(2)}%` };
+        }
+      }
+    }
+
+    // Max age: 24h
+    if ((position.age_minutes ?? 0) >= 24 * 60) {
+      console.log(`[DISCORD_SIGNAL] Max age hit: ${position.pair} at ${position.age_minutes}m (DS max 24h)`);
+      return { action: "CLOSE", rule: "DS_MAX_AGE", reason: "discord signal max age reached (24h)" };
+    }
+
+    // Low yield (same threshold as conservative)
+    if (
+      position.fee_per_tvl_24h != null &&
+      position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
+      (position.age_minutes ?? 0) >= 60
+    ) {
+      return { action: "CLOSE", rule: 7, reason: "low yield" };
+    }
+
+    log("cron", `[DISCORD_SIGNAL] Tight exit rules active for ${position.pair} — SL -5%, trailing TP 5%/2%, max age 24h — no exit triggered`);
+    return null;
+  }
+
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
     if (position.pnl_pct > -90) return false;
