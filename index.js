@@ -2409,6 +2409,9 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   startPolling(telegramHandler);
   (async () => {
     try {
+      console.log('[STARTUP] Waiting 30s for RPC warmup before first screening cycle...');
+      await new Promise(resolve => setTimeout(resolve, 30_000));
+      console.log('[STARTUP] RPC warmup complete — running startup screening cycle');
       console.log('[CYCLE_TYPE] startup-cycle');
       await runScreeningCycle({ silent: false });
     } catch (e) {
