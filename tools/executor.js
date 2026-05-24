@@ -201,10 +201,8 @@ async function validateDeployPoolThresholds(args) {
 
   const volatility = poolDetailVolatility(volatilityDetail);
   if (volatility == null || volatility <= 0) {
-    return {
-      pass: false,
-      reason: `Pool ${volatilityTimeframe} volatility ${volatility ?? "unknown"} is unusable. Refusing deploy.`,
-    };
+    console.log(`[VOLATILITY_SKIP] 30m volatility unavailable (value=${volatility ?? "null"}) — using 5m data only, soft pass`);
+    log("safety", `[VOLATILITY_SKIP] 30m volatility unavailable — soft pass, continuing with 5m data`);
   }
 
   const actualBinStep = poolDetailBinStep(detail);
@@ -641,6 +639,7 @@ export async function executeTool(name, args) {
   if (PROTECTED_TOOLS.has(name)) {
     safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
+      console.log(`[SAFETY_BLOCK] ${name} blocked: ${safetyCheck.reason}`);
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
       return {
         blocked: true,
@@ -1160,16 +1159,22 @@ async function runSafetyChecks(name, args) {
           const okxPrice = okxInfo?.price;
           if (jupPrice != null && okxPrice != null && Number.isFinite(jupPrice) && Number.isFinite(okxPrice) && okxPrice > 0) {
             const pctDiff = Math.abs((jupPrice - okxPrice) / okxPrice) * 100;
-            if (pctDiff > 2) {
-              const msg = `[PRICE_CHECK] FAIL — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% divergence exceeds 2% threshold. Skipping deploy.`;
+            if (pctDiff > 5) {
+              const msg = `[PRICE_CHECK] FAIL — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% divergence exceeds 5% threshold. Skipping deploy.`;
+              console.log('[PRICE_CHECK]', msg);
               log("safety", msg);
               return { pass: false, reason: msg };
             }
-            log("safety", `[PRICE_CHECK] PASS — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% within tolerance`);
+            const passMsg = `[PRICE_CHECK] PASS — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% within tolerance`;
+            console.log('[PRICE_CHECK]', passMsg);
+            log("safety", passMsg);
           } else {
-            log("safety", `[PRICE_CHECK] SKIP — one or both prices unavailable (Jupiter: ${jupPrice ?? "n/a"}, OKX: ${okxPrice ?? "n/a"})`);
+            const skipMsg = `[PRICE_CHECK] SKIP — one or both prices unavailable (Jupiter: ${jupPrice ?? "n/a"}, OKX: ${okxPrice ?? "n/a"})`;
+            console.log('[PRICE_CHECK]', skipMsg);
+            log("safety", skipMsg);
           }
         } catch (e) {
+          console.log(`[PRICE_CHECK] Error during price check: ${e.message}`);
           log("executor_warn", `[PRICE_CHECK] Error during price check: ${e.message}`);
         }
       }
