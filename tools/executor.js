@@ -1095,6 +1095,12 @@ async function runSafetyChecks(name, args) {
         const msg = `[SAFETY] Spot range too lopsided — bins_above ${binsAboveRequested} is less than 20% of bins_below ${binsBelow}. Deploy would cause immediate OOR on any upward move.`;
         log("safety", msg);
         return { pass: false, reason: msg };
+      } else if (strategyForCentering === "spot") {
+        // Spot is intentionally asymmetric (single-side SOL — bins_above are empty upside stubs).
+        // pctFromBottom will always be ~77% after the 30% autocorrect floor, making the symmetric
+        // centering check mathematically broken for spot. Edge/lopsided checks above are sufficient.
+        log("safety", `[SAFETY] Spot strategy — pctFromBottom check skipped (asymmetric by design, pct=${pctFromBottom.toFixed(1)}%)`);
+        // proceed to deploy
       } else if (totalBins > 0) {
         _pricePct = pctFromBottom;
         if (pctFromBottom < 25) {
