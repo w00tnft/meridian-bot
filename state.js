@@ -667,6 +667,20 @@ export function pruneFailedCloses(openPositionAddresses) {
   if (changed) save(state);
 }
 
+/**
+ * Mark a deployed position as originating from a Discord signal.
+ * Sets isDiscordSignal: true on the tracked position so exit rules
+ * can apply tighter thresholds (SL -5%, trailing TP 5%/2%, max age 24h).
+ */
+export function markDiscordSignalPosition(position_address) {
+  if (!position_address) return;
+  const state = load();
+  if (!state.positions[position_address]) return;
+  state.positions[position_address].isDiscordSignal = true;
+  save(state);
+  log("state", `[DISCORD_SIGNAL] Position ${position_address} marked as Discord signal — tight exit rules active`);
+}
+
 // ─── Raw state access (for subsystems that embed their data in state.json) ──
 
 export function getState() {

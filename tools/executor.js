@@ -13,7 +13,8 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction, recordClosedToken, isTokenOnCooldown, setPositionHighConvictionFlags, getStrategyMode, getTrackedPosition } from "../state.js";
+import { setPositionInstruction, recordClosedToken, isTokenOnCooldown, setPositionHighConvictionFlags, getStrategyMode, getTrackedPosition, markDiscordSignalPosition } from "../state.js";
+import { isDiscordSignal } from "./discord-signals.js";
 import { calculateSupertrend, calculateFibLevels, selectBinsBySupertrendPosition, fetch15mCandles } from "./indicators.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
@@ -103,6 +104,14 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
+  // Discord signal fast-track: relaxed entry thresholds for high-risk/high-reward Discord pools
+  const discordFastTrack = config.screening.useDiscordSignals && await isDiscordSignal(args.pool_address);
+  if (discordFastTrack) {
+    const symbol = args.pool_name || args.pool_address?.slice(0, 8);
+    console.log(`[DISCORD_SIGNAL] Fast-track lane active for ${symbol} — relaxed entry rules applied (age≥6h, feeRatio≥0.01, botMax40%, holders≥100)`);
+    log("safety", `[DISCORD_SIGNAL] Fast-track: ${symbol}`);
+  }
+
   const tvl = poolDetailTvl(detail);
   const minTvl = numberOrNull(config.screening.minTvl);
   const maxTvl = numberOrNull(config.screening.maxTvl);
@@ -126,64 +135,76 @@ async function validateDeployPoolThresholds(args) {
   }
 
   const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
-  const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+  const minFeeActiveTvlRatio = discordFastTrack ? 0.01 : numberOrNull(config.screening.minFeeActiveTvlRatio);
   if (
     minFeeActiveTvlRatio != null &&
     minFeeActiveTvlRatio > 0 &&
     (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
   ) {
+    if (discordFastTrack) console.log(`[DISCORD_SIGNAL] feeActiveTvlRatio ${feeActiveTvlRatio ?? "unknown"}% failed even relaxed 0.01% threshold`);
     return {
       pass: false,
-      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below ${discordFastTrack ? "Discord fast-track minimum 0.01" : `configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`}%.`,
     };
   }
 
-  // Strategy 2: pool/token age must be at least 72 hours
-  // Two-tier HC Override for 24-72h pools:
-  //   < 24h      → always blocked, no exceptions
-  //   24–48h     → Tier 1 HC Override (organic ≥ 80%, score ≥ 4.3)
-  //   48–72h     → Tier 2 HC Override (organic ≥ 75%, score ≥ 4.0)
-  //   ≥ 72h      → normal deploy, no check needed
+  // Pool/token age check
+  // Discord fast-track: minimum 6h, HC override tiers skipped entirely
+  // Normal: minimum 72h, with two-tier HC Override for 24-72h pools
   const tokenAgeHours = poolDetailTokenCreatedAt(detail);
-  const MIN_POOL_AGE_HOURS = 72;
-  if (tokenAgeHours != null && tokenAgeHours < MIN_POOL_AGE_HOURS) {
-    const organicScore = numberOrNull(detail?.organic_score ?? args.organic_score);
-    const feeTvlRatio  = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
-    const score        = numberOrNull(args.score);
-    const amountSol    = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
 
-    if (tokenAgeHours < 24) {
+  if (discordFastTrack) {
+    if (tokenAgeHours != null && tokenAgeHours < 6) {
+      const reason = `[DISCORD_SIGNAL] Pool age block: ${args.pool_address} is only ${tokenAgeHours.toFixed(1)}h old (Discord fast-track minimum 6h)`;
+      console.log(reason);
+      return { pass: false, reason };
+    }
+    // ≥ 6h passes — fall through to volatility/binStep checks
+  } else {
+    // Normal path: 72h minimum with two-tier HC Override for 24-72h
+    //   < 24h      → always blocked, no exceptions
+    //   24–48h     → Tier 1 HC Override (organic ≥ 80%, score ≥ 4.3)
+    //   48–72h     → Tier 2 HC Override (organic ≥ 75%, score ≥ 4.0)
+    //   ≥ 72h      → normal deploy
+    const MIN_POOL_AGE_HOURS = 72;
+    if (tokenAgeHours != null && tokenAgeHours < MIN_POOL_AGE_HOURS) {
+      const organicScore = numberOrNull(detail?.organic_score ?? args.organic_score);
+      const feeTvlRatio  = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
+      const score        = numberOrNull(args.score);
+      const amountSol    = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
+
+      if (tokenAgeHours < 24) {
+        return {
+          pass: false,
+          reason: `[SAFETY] Pool age block: ${args.pool_address} is only ${tokenAgeHours.toFixed(1)}h old (minimum 24h — no exceptions)`,
+        };
+      }
+
+      const isTier1 = tokenAgeHours < 48;
+      const minOrganic = isTier1 ? 80 : 75;
+      const minScore   = isTier1 ? 4.3 : 4.0;
+      const tierLabel  = isTier1 ? "Tier 1" : "Tier 2";
+      const tierWindow = isTier1 ? "24-48h" : "48-72h";
+
+      const organicOk = organicScore != null && organicScore >= minOrganic;
+      const scoreOk   = score        != null && score         >= minScore;
+
+      if (organicOk && scoreOk) {
+        log("safety", `[SAFETY] ⚡ ${tierLabel} HC Override: ${tokenAgeHours.toFixed(1)}h pool — organic ${organicScore}%, score ${score}`);
+        const hcTier = isTier1 ? 1 : 2;
+        return { pass: true, highConviction: true, hcTier, tierWindow, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
+      }
+
+      const failReasons = [
+        !organicOk && `organic ${organicScore ?? "unknown"}% < ${minOrganic}%`,
+        !scoreOk   && `score ${score ?? "not provided"} < ${minScore}`,
+      ].filter(Boolean).join(", ");
+
       return {
         pass: false,
-        reason: `[SAFETY] Pool age block: ${args.pool_address} is only ${tokenAgeHours.toFixed(1)}h old (minimum 24h — no exceptions)`,
+        reason: `[SAFETY] Pool age block: ${args.pool_address} is ${tokenAgeHours.toFixed(1)}h old. ${tierLabel} HC Override failed: ${failReasons}`,
       };
     }
-
-    // Determine tier thresholds
-    const isTier1 = tokenAgeHours < 48; // 24–48h
-    const minOrganic = isTier1 ? 80 : 75;
-    const minScore   = isTier1 ? 4.3 : 4.0;
-    const tierLabel  = isTier1 ? "Tier 1" : "Tier 2";
-    const tierWindow = isTier1 ? "24-48h" : "48-72h";
-
-    const organicOk = organicScore != null && organicScore >= minOrganic;
-    const scoreOk   = score        != null && score         >= minScore;
-
-    if (organicOk && scoreOk) {
-      log("safety", `[SAFETY] ⚡ ${tierLabel} HC Override: ${tokenAgeHours.toFixed(1)}h pool — organic ${organicScore}%, score ${score}`);
-      const hcTier = isTier1 ? 1 : 2;
-      return { pass: true, highConviction: true, hcTier, tierWindow, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
-    }
-
-    const failReasons = [
-      !organicOk && `organic ${organicScore ?? "unknown"}% < ${minOrganic}%`,
-      !scoreOk   && `score ${score ?? "not provided"} < ${minScore}`,
-    ].filter(Boolean).join(", ");
-
-    return {
-      pass: false,
-      reason: `[SAFETY] Pool age block: ${args.pool_address} is ${tokenAgeHours.toFixed(1)}h old. ${tierLabel} HC Override failed: ${failReasons}`,
-    };
   }
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
@@ -221,7 +242,7 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  return { pass: true, feeActiveTvlRatio };
+  return { pass: true, feeActiveTvlRatio, discordFastTrack };
 }
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
@@ -672,6 +693,10 @@ export async function executeTool(name, args) {
         }
         if (safetyCheck?.highConviction && result.position) {
           notifyHighConviction({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), ageHours: safetyCheck.tokenAgeHours, score: safetyCheck.score, organic: safetyCheck.organicScore, feeTvlRatio: safetyCheck.feeTvlRatio, amountSol: args.amount_y ?? args.amount_sol ?? 0, hcTier: safetyCheck.hcTier ?? 1, tierWindow: safetyCheck.tierWindow }).catch(() => {});
+        }
+        if (safetyCheck?.discordFastTrack && result.position) {
+          markDiscordSignalPosition(result.position);
+          console.log(`[DISCORD_SIGNAL] Position ${result.position} marked — tight exit rules: SL -5%, trailing TP 5%/2%, max age 24h`);
         }
       } else if (name === "close_position") {
         const _closedTracked = result.position ? getTrackedPosition(result.position) : null;
