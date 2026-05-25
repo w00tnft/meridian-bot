@@ -78,6 +78,7 @@ ${decisionSummary}` : ""}
 TIMEFRAME SCALING — volume, fee_active_tvl_ratio, fee_24h, price change, and activity metrics are measured over the active timeframe window. Volatility is supplied from max(screening timeframe, 30m): 5m/15m screens use 30m volatility; 30m+ screens use their own timeframe volatility.
 The same pool will show much smaller numbers on 5m vs 24h. Adjust your expectations accordingly:
 
+  // documentation only — not a gate; actual gate is minFeeActiveTvlRatio in executor.js
   timeframe │ fee_active_tvl_ratio │ volume (good pool)
   ──────────┼─────────────────────┼────────────────────
   5m        │ ≥ 0.02% = decent    │ ≥ $500

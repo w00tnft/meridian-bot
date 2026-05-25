@@ -817,7 +817,7 @@ STEPS:
    Always pass deploy_position.score = your score for this pool (out of 5.0).
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
-   HIGH CONVICTION OVERRIDE: If a pool is younger than 72h but scores >= 4.5/5, has organic >= 85%, fee/tvl >= 0.8, and you believe it is exceptional, you may attempt to deploy up to 0.25 SOL. Set amount_y = 0.25 (or less). The safety layer will enforce all five conditions — if any fail, the deploy will be blocked automatically. If you are using this override, include "HIGH CONVICTION" in your decision report.
+   HIGH CONVICTION OVERRIDE: If a pool is younger than 72h and scores >= 4.5/5 (Tier 0: 12-24h), >= 4.3/5 (Tier 1: 24-48h), or >= 4.0/5 (Tier 2: 48-72h), and has organic >= 85%/80%/75% respectively, and you believe it is exceptional, you may attempt to deploy up to 0.25 SOL. Set amount_y = 0.25 (or less). Do NOT apply a fee/TVL condition here — fee/TVL is already enforced upstream by minFeeActiveTvlRatio before you see any candidate. The safety layer will enforce the score and organic thresholds — if they fail, the deploy will be blocked automatically. If you are using this override, include "HIGH CONVICTION" in your decision report.
 4. Report your decision using EXACTLY this format — no markdown bold, no paragraphs, no extra sections:
 
    If deploying:
