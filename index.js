@@ -675,6 +675,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return true;
     });
 
+    // Keep /candidates in sync with what this cycle actually evaluated
+    setLatestCandidates(passing.map(({ pool }) => pool), "screening-cycle");
+
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
       const combinedExamples = combined.slice(0, 3)
@@ -1291,10 +1294,12 @@ const MAX_HISTORY = 20;    // keep last 20 messages (10 exchanges)
 let _ttyInterface = null;
 let _latestCandidates = [];
 let _latestCandidatesAt = null;
+let _latestCandidatesSource = null; // "screening-cycle" | "screen-cmd" | "startup"
 
-function setLatestCandidates(candidates = []) {
+function setLatestCandidates(candidates = [], source = null) {
   _latestCandidates = Array.isArray(candidates) ? candidates : [];
   _latestCandidatesAt = new Date().toISOString();
+  _latestCandidatesSource = source ?? null;
 }
 
 function getLatestCandidatesMeta() {
@@ -1314,8 +1319,17 @@ function describeLatestCandidates(limit = 5) {
     const organic = pool.organic_score ?? "?";
     return `${i + 1}. ${pool.name} | fee/aTVL ${feeTvl}% | vol $${vol} | in-range ${active}% | organic ${organic}`;
   });
-  const age = _latestCandidatesAt ? new Date(_latestCandidatesAt).toLocaleString("en-US", { hour12: false }) : "unknown";
-  return `Latest candidates (${_latestCandidates.length}) — updated ${age}\n\n${lines.join("\n")}`;
+  let ageStr = "unknown";
+  if (_latestCandidatesAt) {
+    const diffMs = Date.now() - new Date(_latestCandidatesAt).getTime();
+    const diffMin = Math.floor(diffMs / 60_000);
+    ageStr = diffMin < 1 ? "just now" : diffMin < 60 ? `${diffMin}m ago` : `${Math.floor(diffMin / 60)}h ${diffMin % 60}m ago`;
+  }
+  const sourceLabel = _latestCandidatesSource === "screening-cycle" ? "screening cycle"
+    : _latestCandidatesSource === "screen-cmd" ? "/screen command"
+    : _latestCandidatesSource === "startup" ? "startup"
+    : "unknown source";
+  return `Latest candidates (${_latestCandidates.length}) — last updated by ${sourceLabel}: ${ageStr}\n\n${lines.join("\n")}`;
 }
 
 function formatWalletStatus(wallet, positions) {
@@ -1629,10 +1643,10 @@ function formatHelpText() {
   ].join("\n");
 }
 
-async function runDeterministicScreen(limit = 5) {
+async function runDeterministicScreen(limit = 20) {
   const top = await getTopCandidates({ limit });
   const candidates = (top?.candidates || top?.pools || []).slice(0, limit);
-  setLatestCandidates(candidates);
+  setLatestCandidates(candidates, "screen-cmd");
   if (candidates.length > 0) {
     const lines = candidates.map((pool, i) => {
       const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
@@ -2279,7 +2293,7 @@ if (isMain && isTTY) {
       getTopCandidates({ limit: 5 }),
     ]);
 
-    setLatestCandidates(candidates);
+    setLatestCandidates(candidates, "startup");
 
     console.log(`Wallet:    ${wallet.sol} SOL  ($${wallet.sol_usd})  |  SOL price: $${wallet.sol_price}`);
     console.log(`Positions: ${positions.total_positions} open\n`);
@@ -2397,8 +2411,8 @@ Commands:
 
     if (input === "/candidates") {
       await runBusy(async () => {
-        const { candidates, total_eligible, total_screened } = await getTopCandidates({ limit: 5 });
-        setLatestCandidates(candidates);
+        const { candidates, total_eligible, total_screened } = await getTopCandidates({ limit: 20 });
+        setLatestCandidates(candidates, "screen-cmd");
         console.log(`\nTop pools (${total_eligible} eligible from ${total_screened} screened):\n`);
         console.log(formatCandidates(candidates));
         console.log();
