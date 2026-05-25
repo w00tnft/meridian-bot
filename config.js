@@ -89,6 +89,11 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    minPoolAgeHours:    u.minPoolAgeHours    ?? 6,    // absolute floor — no deploy below this (no exceptions)
+    maxPoolAgeDays:     u.maxPoolAgeDays     ?? 10,   // dead pool ceiling — block above this
+    tier0Override:      u.tier0Override      ?? { minOrganic: 85, minScore: 4.5 }, // 12-24h HC gate
+    tier1Override:      u.tier1Override      ?? { minOrganic: 80, minScore: 4.3 }, // 24-48h HC gate
+    tier2Override:      u.tier2Override      ?? { minOrganic: 75, minScore: 4.0 }, // 48-72h HC gate
   },
 
   // ─── Position Management ────────────────

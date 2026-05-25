@@ -148,62 +148,87 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  // Pool/token age check
-  // Discord fast-track: minimum 6h, HC override tiers skipped entirely
-  // Normal: minimum 72h, with two-tier HC Override for 24-72h pools
+  // ── Tiered Pool Age Gate ────────────────────────────────────────────────
+  // <minPoolAgeHours (6h)    → hard block, no exceptions (not even Discord)
+  // 6–12h                   → Discord signal only; non-Discord blocked
+  // 12–24h                  → Tier 0 HC Override (organic ≥85%, score ≥4.5)
+  // 24–48h                  → Tier 1 HC Override (organic ≥80%, score ≥4.3)
+  // 48–72h                  → Tier 2 HC Override (organic ≥75%, score ≥4.0)
+  // 72h – maxPoolAgeDays    → normal deploy, no restriction
+  // >maxPoolAgeDays (10d)   → hard block (dead pool protection)
+  // Discord pools: 6h floor and 10d ceiling apply; tier checks skipped
   const tokenAgeHours = poolDetailTokenCreatedAt(detail);
+  const minPoolAgeHours = config.screening.minPoolAgeHours ?? 6;
+  const maxPoolAgeHours = (config.screening.maxPoolAgeDays ?? 10) * 24;
 
-  if (discordFastTrack) {
-    if (tokenAgeHours != null && tokenAgeHours < 6) {
-      const reason = `[DISCORD_SIGNAL] Pool age block: ${args.pool_address} is only ${tokenAgeHours.toFixed(1)}h old (Discord fast-track minimum 6h)`;
+  if (tokenAgeHours != null) {
+    // Absolute floor — no exceptions
+    if (tokenAgeHours < minPoolAgeHours) {
+      const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old is below ${minPoolAgeHours}h minimum (no exceptions)`;
       console.log(reason);
       return { pass: false, reason };
     }
-    // ≥ 6h passes — fall through to volatility/binStep checks
-  } else {
-    // Normal path: 72h minimum with two-tier HC Override for 24-72h
-    //   < 24h      → always blocked, no exceptions
-    //   24–48h     → Tier 1 HC Override (organic ≥ 80%, score ≥ 4.3)
-    //   48–72h     → Tier 2 HC Override (organic ≥ 75%, score ≥ 4.0)
-    //   ≥ 72h      → normal deploy
-    const MIN_POOL_AGE_HOURS = 72;
-    if (tokenAgeHours != null && tokenAgeHours < MIN_POOL_AGE_HOURS) {
-      const organicScore = numberOrNull(detail?.organic_score ?? args.organic_score);
-      const feeTvlRatio  = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
-      const score        = numberOrNull(args.score);
-      const amountSol    = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
 
-      if (tokenAgeHours < 24) {
+    // Dead pool ceiling
+    if (tokenAgeHours > maxPoolAgeHours) {
+      const reason = `[AGE_GATE] BLOCK — pool ${(tokenAgeHours / 24).toFixed(1)} days old exceeds ${config.screening.maxPoolAgeDays ?? 10}-day maximum (dead pool protection)`;
+      console.log(reason);
+      return { pass: false, reason };
+    }
+
+    if (discordFastTrack) {
+      // Discord pools: 6h floor and 10d ceiling already checked above — pass through
+      console.log(`[AGE_GATE] Discord signal pool ${tokenAgeHours.toFixed(1)}h old — fast-track eligible (6h–10d window)`);
+    } else {
+      // Non-Discord: enforce tier windows
+      if (tokenAgeHours < 12) {
+        const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old requires Discord signal (6-12h window: Discord only)`;
+        console.log(reason);
+        return { pass: false, reason };
+      }
+
+      if (tokenAgeHours < 72) {
+        const organicScore = numberOrNull(detail?.organic_score ?? args.organic_score);
+        const feeTvlRatio  = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
+        const score        = numberOrNull(args.score);
+        const amountSol    = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
+
+        let tierNum, tierLabel, tierWindow, tierCfg;
+        if (tokenAgeHours < 24) {
+          tierNum = 0; tierLabel = "Tier 0"; tierWindow = "12-24h";
+          tierCfg = config.screening.tier0Override ?? { minOrganic: 85, minScore: 4.5 };
+        } else if (tokenAgeHours < 48) {
+          tierNum = 1; tierLabel = "Tier 1"; tierWindow = "24-48h";
+          tierCfg = config.screening.tier1Override ?? { minOrganic: 80, minScore: 4.3 };
+        } else {
+          tierNum = 2; tierLabel = "Tier 2"; tierWindow = "48-72h";
+          tierCfg = config.screening.tier2Override ?? { minOrganic: 75, minScore: 4.0 };
+        }
+
+        const { minOrganic, minScore } = tierCfg;
+        console.log(`[AGE_GATE] Pool ${tokenAgeHours.toFixed(1)}h old — ${tierLabel} HC required (organic ≥${minOrganic}%, score ≥${minScore})`);
+
+        const organicOk = organicScore != null && organicScore >= minOrganic;
+        const scoreOk   = score        != null && score         >= minScore;
+
+        if (organicOk && scoreOk) {
+          log("safety", `[SAFETY] ⚡ ${tierLabel} HC Override: ${tokenAgeHours.toFixed(1)}h pool — organic ${organicScore}%, score ${score}`);
+          return { pass: true, highConviction: true, hcTier: tierNum, tierWindow, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
+        }
+
+        const failReasons = [
+          !organicOk && `organic ${organicScore ?? "unknown"}% < ${minOrganic}%`,
+          !scoreOk   && `score ${score ?? "not provided"} < ${minScore}`,
+        ].filter(Boolean).join(", ");
+
         return {
           pass: false,
-          reason: `[SAFETY] Pool age block: ${args.pool_address} is only ${tokenAgeHours.toFixed(1)}h old (minimum 24h — no exceptions)`,
+          reason: `[AGE_GATE] BLOCK — ${tierLabel} HC failed for ${tokenAgeHours.toFixed(1)}h pool: ${failReasons}`,
         };
       }
 
-      const isTier1 = tokenAgeHours < 48;
-      const minOrganic = isTier1 ? 80 : 75;
-      const minScore   = isTier1 ? 4.3 : 4.0;
-      const tierLabel  = isTier1 ? "Tier 1" : "Tier 2";
-      const tierWindow = isTier1 ? "24-48h" : "48-72h";
-
-      const organicOk = organicScore != null && organicScore >= minOrganic;
-      const scoreOk   = score        != null && score         >= minScore;
-
-      if (organicOk && scoreOk) {
-        log("safety", `[SAFETY] ⚡ ${tierLabel} HC Override: ${tokenAgeHours.toFixed(1)}h pool — organic ${organicScore}%, score ${score}`);
-        const hcTier = isTier1 ? 1 : 2;
-        return { pass: true, highConviction: true, hcTier, tierWindow, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
-      }
-
-      const failReasons = [
-        !organicOk && `organic ${organicScore ?? "unknown"}% < ${minOrganic}%`,
-        !scoreOk   && `score ${score ?? "not provided"} < ${minScore}`,
-      ].filter(Boolean).join(", ");
-
-      return {
-        pass: false,
-        reason: `[SAFETY] Pool age block: ${args.pool_address} is ${tokenAgeHours.toFixed(1)}h old. ${tierLabel} HC Override failed: ${failReasons}`,
-      };
+      // 72h–10d: normal deploy
+      console.log(`[AGE_GATE] Pool ${(tokenAgeHours / 24).toFixed(1)} days old — normal deploy eligible`);
     }
   }
 
@@ -448,6 +473,11 @@ const toolMap = {
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       athFilterPct:     ["screening", "athFilterPct"],
+      minPoolAgeHours:  ["screening", "minPoolAgeHours"],
+      maxPoolAgeDays:   ["screening", "maxPoolAgeDays"],
+      tier0Override:    ["screening", "tier0Override"],
+      tier1Override:    ["screening", "tier1Override"],
+      tier2Override:    ["screening", "tier2Override"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
