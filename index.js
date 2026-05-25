@@ -7,7 +7,7 @@ import { agentLoop, resetCycleDeployGuard } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates } from "./tools/screening.js";
+import { getTopCandidates, getPoolDetail } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter, getLastDeployMeta } from "./tools/executor.js";
@@ -1610,6 +1610,7 @@ function formatHelpText() {
     "/wallet — wallet, deploy amount, HiveMind status",
     "/positions — list open positions",
     "/pool <n> — detailed info for one open position",
+    "/pool <address|symbol> — pool metadata (age, TVL, vol 24h, fee/TVL, bin step)",
     "/close <n> — close one position by index",
     "/closeall — close all open positions",
     "/set <n> <note> — set note/instruction on position",
@@ -1837,23 +1838,88 @@ async function telegramHandler(msg) {
     return;
   }
 
-  const poolMatch = text.match(/^\/pool\s+(\d+)$/i);
+  const poolMatch = text.match(/^\/pool\s+(\S+)$/i);
   if (poolMatch) {
+    const poolArg = poolMatch[1];
+
+    // /pool <n> — existing position-by-index behaviour
+    if (/^\d+$/.test(poolArg)) {
+      try {
+        const idx = parseInt(poolArg) - 1;
+        const { positions } = await getMyPositions({ force: true });
+        if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+        const pos = positions[idx];
+        await sendMessage([
+          `${idx + 1}. ${pos.pair}`,
+          `Pool: ${pos.pool}`,
+          `Position: ${pos.position}`,
+          `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
+          `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
+          `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
+          `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
+          pos.instruction ? `Note: ${pos.instruction}` : null,
+        ].filter(Boolean).join("\n"));
+      } catch (e) {
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+
+    // /pool <address|symbol> — pool metadata lookup
     try {
-      const idx = parseInt(poolMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const pos = positions[idx];
-      await sendMessage([
-        `${idx + 1}. ${pos.pair}`,
-        `Pool: ${pos.pool}`,
-        `Position: ${pos.position}`,
-        `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
-        `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
-        `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
-        pos.instruction ? `Note: ${pos.instruction}` : null,
-      ].filter(Boolean).join("\n"));
+      await sendMessage(`Looking up pool "${poolArg}"...`);
+
+      const isSolanaAddress = poolArg.length >= 32 && /^[A-HJ-NP-Za-km-z1-9]+$/.test(poolArg);
+      let pools = [];
+
+      if (isSolanaAddress) {
+        const pool = await getPoolDetail({ pool_address: poolArg, timeframe: "24h" });
+        pools = [pool];
+      } else {
+        const res = await fetch(
+          `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(poolArg)}&sort_by=${encodeURIComponent("tvl:desc")}&page_size=5`
+        );
+        if (!res.ok) throw new Error(`Pool search failed: ${res.status}`);
+        const data = await res.json();
+        pools = (Array.isArray(data?.data) ? data.data : []).slice(0, 3);
+      }
+
+      if (!pools.length) { await sendMessage(`No pools found for "${poolArg}".`); return; }
+
+      const fmtUsd = (n) => n != null ? `$${Math.round(n).toLocaleString()}` : "unknown";
+      const fmtAge = (createdAtMs) => {
+        if (!createdAtMs) return "unknown";
+        const h = Math.floor((Date.now() - Number(createdAtMs)) / 3_600_000);
+        if (h < 24) return `${h}h`;
+        const d = Math.floor(h / 24);
+        return (h % 24) > 0 ? `${d}d ${h % 24}h` : `${d}d`;
+      };
+      const fmtTs = (ms) => ms ? new Date(Number(ms)).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "unknown";
+
+      const lines = pools.map((pool, i) => {
+        const name = pool.name || pool.pool_address?.slice(0, 12) || "unknown";
+        const addr = pool.pool_address ?? pool.address ?? "unknown";
+        const createdMs = pool.token_x?.created_at ?? pool.base_token_created_at;
+        const tvl = fmtUsd(pool.tvl ?? pool.active_tvl);
+        const vol = fmtUsd(pool.volume ?? pool.volume_window);
+        const feeTvlRaw = pool.fee_active_tvl_ratio;
+        const feeTvl = feeTvlRaw != null ? `${(feeTvlRaw * 100).toFixed(2)}%` : "unknown";
+        const binStep = pool.dlmm_params?.bin_step ?? pool.bin_step ?? "unknown";
+        const feePct = pool.fee_pct != null ? `${pool.fee_pct}%` : null;
+
+        return [
+          pools.length > 1 ? `${i + 1}. ${name}` : `Pool: ${name}`,
+          `Address: ${addr}`,
+          `Age: ${fmtAge(createdMs)} (created ${fmtTs(createdMs)})`,
+          `TVL: ${tvl}`,
+          `Volume 24h: ${vol}`,
+          `Fee/TVL: ${feeTvl}`,
+          `Bin step: ${binStep}`,
+          feePct ? `Base fee: ${feePct}` : null,
+        ].filter(Boolean).join("\n");
+      });
+
+      await sendMessage(lines.join("\n\n---\n\n"));
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
