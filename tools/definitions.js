@@ -143,6 +143,8 @@ Guidelines (only when user hasn't specified):
 - Bins: choose from configured minBinsBelow/maxBinsBelow by positive volatility. The hard lower floor is 35 bins.
 - Deposit: single-sided SOL only: set amount_y/amount_sol, keep amount_x=0.
 
+ANTI-PRE-FILTER RULE: If a pool's fee/active-TVL meets or exceeds minFeeActiveTvlRatio, you MUST call deploy_position and let the safety system make the final call. Do NOT skip a pool because you think it might fail a safety check — your math may be wrong. The executor will block it if needed. Never substitute your own threshold judgment for the safety system.
+
 WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
       parameters: {
         type: "object",
