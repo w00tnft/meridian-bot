@@ -88,7 +88,8 @@ export const config = {
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
-    athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    athFilterPct:          u.athFilterPct          ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    maxPriceDivergencePct: u.maxPriceDivergencePct ?? 8,    // Jupiter vs OKX max allowed % divergence
     minPoolAgeHours:    u.minPoolAgeHours    ?? 6,    // absolute floor — no deploy below this (no exceptions)
     maxPoolAgeDays:     u.maxPoolAgeDays     ?? 10,   // dead pool ceiling — block above this
     tier0Override:      u.tier0Override      ?? { minOrganic: 85, minScore: 4.5 }, // 12-24h HC gate
