@@ -472,7 +472,8 @@ const toolMap = {
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
-      athFilterPct:     ["screening", "athFilterPct"],
+      athFilterPct:            ["screening", "athFilterPct"],
+      maxPriceDivergencePct:   ["screening", "maxPriceDivergencePct"],
       minPoolAgeHours:  ["screening", "minPoolAgeHours"],
       maxPoolAgeDays:   ["screening", "maxPoolAgeDays"],
       tier0Override:    ["screening", "tier0Override"],
@@ -1220,13 +1221,14 @@ async function runSafetyChecks(name, args) {
           const okxPrice = okxInfo?.price;
           if (jupPrice != null && okxPrice != null && Number.isFinite(jupPrice) && Number.isFinite(okxPrice) && okxPrice > 0) {
             const pctDiff = Math.abs((jupPrice - okxPrice) / okxPrice) * 100;
-            if (pctDiff > 5) {
-              const msg = `[PRICE_CHECK] FAIL — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% divergence exceeds 5% threshold. Skipping deploy.`;
+            const maxDivergence = config.screening.maxPriceDivergencePct ?? 8;
+            if (pctDiff > maxDivergence) {
+              const msg = `[PRICE_CHECK] FAIL — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% divergence exceeds ${maxDivergence}% threshold. Skipping deploy.`;
               console.log('[PRICE_CHECK]', msg);
               log("safety", msg);
               return { pass: false, reason: msg };
             }
-            const passMsg = `[PRICE_CHECK] PASS — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% within tolerance`;
+            const passMsg = `[PRICE_CHECK] PASS — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% within ${maxDivergence}% tolerance`;
             console.log('[PRICE_CHECK]', passMsg);
             log("safety", passMsg);
           } else {
