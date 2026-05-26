@@ -796,7 +796,15 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
+      console.log('[DEPLOY_ARGS]', JSON.stringify({ pool_address: args.pool_address, amount_y: args.amount_y, base_mint: args.base_mint, bins_above: args.bins_above, bins_below: args.bins_below }));
+
+      let deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
+      if (!Number.isFinite(deployAmountY) || deployAmountY <= 0) {
+        const corrected = config.management.deployAmountSol ?? 0.5;
+        console.log(`[DEPLOY_AUTOCORRECT] amount_y was ${args.amount_y} — set to ${corrected} SOL`);
+        args = { ...args, amount_y: corrected, amount_sol: corrected };
+        deployAmountY = corrected;
+      }
       const deployAmountX = Number(args.amount_x ?? 0);
       if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
         return {
@@ -878,10 +886,18 @@ async function runSafetyChecks(name, args) {
 
       // Block same base token across different pools — base_mint is required
       if (!args.base_mint) {
-        return {
-          pass: false,
-          reason: "base_mint is required to verify no duplicate token position exists. Provide base_mint and retry.",
-        };
+        try {
+          const poolDetail = await fetchFreshPoolDetail(args.pool_address);
+          const derivedMint = poolDetail?.token_x?.address;
+          if (derivedMint) {
+            console.log(`[DEPLOY_AUTOCORRECT] base_mint was undefined — derived ${derivedMint} from pool detail`);
+            args = { ...args, base_mint: derivedMint };
+          } else {
+            return { pass: false, reason: "base_mint is required and could not be derived from pool detail. Provide base_mint and retry." };
+          }
+        } catch (e) {
+          return { pass: false, reason: `base_mint is required and pool detail fetch failed: ${e.message}` };
+        }
       }
       const alreadyHasMint = positions.positions.some(
         (p) => p.base_mint === args.base_mint
