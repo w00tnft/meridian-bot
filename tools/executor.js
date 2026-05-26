@@ -654,6 +654,9 @@ export async function executeTool(name, args) {
   // ─── Execute ──────────────────────────────
   try {
     const result = await fn(args);
+    if (name === "deploy_position") {
+      console.log('[DEPLOY_RESULT]', JSON.stringify(result));
+    }
     const duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
 
