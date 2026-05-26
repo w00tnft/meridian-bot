@@ -802,7 +802,8 @@ async function runSafetyChecks(name, args) {
       if (!Number.isFinite(deployAmountY) || deployAmountY <= 0) {
         const corrected = config.management.deployAmountSol ?? 0.5;
         console.log(`[DEPLOY_AUTOCORRECT] amount_y was ${args.amount_y} — set to ${corrected} SOL`);
-        args = { ...args, amount_y: corrected, amount_sol: corrected };
+        args.amount_y = corrected;
+        args.amount_sol = corrected;
         deployAmountY = corrected;
       }
       const deployAmountX = Number(args.amount_x ?? 0);
@@ -866,6 +867,12 @@ async function runSafetyChecks(name, args) {
         };
       }
 
+      // Autocorrect missing bins_above before any downstream check reads it
+      if (args.bins_above === undefined || args.bins_above === null) {
+        args.bins_above = args.bins_below || 0;
+        console.log(`[DEPLOY_AUTOCORRECT] bins_above was missing — set to ${args.bins_above}`);
+      }
+
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
       const positions = await getMyPositions({ force: true });
       if (positions.total_positions >= config.risk.maxPositions) {
@@ -891,7 +898,7 @@ async function runSafetyChecks(name, args) {
           const derivedMint = poolDetail?.token_x?.address;
           if (derivedMint) {
             console.log(`[DEPLOY_AUTOCORRECT] base_mint was undefined — derived ${derivedMint} from pool detail`);
-            args = { ...args, base_mint: derivedMint };
+            args.base_mint = derivedMint;
           } else {
             return { pass: false, reason: "base_mint is required and could not be derived from pool detail. Provide base_mint and retry." };
           }

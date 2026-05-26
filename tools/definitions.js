@@ -136,7 +136,7 @@ HARD RULES:
 - Bin Step: Only deploy in pools with bin_step within the configured [minBinStep, maxBinStep] range (see Config in system prompt). The safety system will reject anything outside this range.
 - Volatility must be positive. If volatility is 0, null, or missing, do not deploy.
 - Range must cover at least 35 total bins. Never deploy 1-bin/tiny ranges.
-- For single-side SOL deploys (amount_y only, amount_x=0): set bins_above to at least 30% of bins_below (e.g. bins_below=60 → bins_above=18). This creates an empty upside buffer so a pump doesn't cause instant OOR. Do NOT set bins_above=0 for spot — the safety system will autocorrect, but prefer to pass the right value.
+- bins_above is REQUIRED — always provide it explicitly. For bid_ask: bins_above must equal bins_below. For spot: bins_above must be at least 30% of bins_below (e.g. bins_below=60 → bins_above=18). This creates an empty upside buffer so a pump doesn't cause instant OOR. Never omit bins_above.
 - Deploy amount: amount_y MUST equal the Deploy amount shown in the SCREENING CYCLE header exactly. Never round down, never split, never substitute a smaller number. The only exception is a HC Override deploy (younger than 72h pool), which uses up to 0.25 SOL.
 
 Guidelines (only when user hasn't specified):
