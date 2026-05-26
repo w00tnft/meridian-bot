@@ -14,7 +14,7 @@
   "minTokenFeesSol": 3,
   "hiveMindUrl": "https://api.agentmeridian.xyz",
   "hiveMindApiKey": "hm_8f3c7d1b4a6e92c5f0d8a3b7c1e4f9a2b6d7c8e1f3a5b9d2c4e6f8a1b3d5c7",
-  "maxPriceDivergencePct": 8,
+  "maxPriceDivergencePct": 10,
   "minPoolAgeHours": 6,
   "maxPoolAgeDays": 10,
   "tier0Override": { "minOrganic": 85, "minScore": 4.5 },
