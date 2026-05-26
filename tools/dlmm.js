@@ -540,6 +540,7 @@ export async function deployPosition({
   organic_score,
   initial_value_usd,
 }) {
+  console.log('[DEPLOY_DRY_RUN_CHECK]', process.env.DRY_RUN, typeof process.env.DRY_RUN);
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
   let activeBinsBelow = bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
@@ -666,6 +667,8 @@ export async function deployPosition({
   const isWideRange = totalBins > 69;
   const minBinId = activeBin.binId - activeBinsBelow;
   const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
+
+  console.log('[DEPLOY_SDK]', { totalBins, minBinsBelow, strategy: activeStrategy, isSingleSidedSol, bins_above: activeBinsAbove, bins_below: activeBinsBelow, activeBinId: activeBin?.binId, minBinId, maxBinId });
 
   if (minBinId > maxBinId) {
     throw new Error(`Invalid bin range: ${minBinId} -> ${maxBinId}`);
