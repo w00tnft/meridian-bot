@@ -817,7 +817,7 @@ STEPS:
    Always pass deploy_position.score = your score for this pool (out of 5.0).
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
-   HIGH CONVICTION OVERRIDE: If a pool is younger than 72h and scores >= 4.5/5 (Tier 0: 12-24h), >= 4.3/5 (Tier 1: 24-48h), or >= 4.0/5 (Tier 2: 48-72h), and has organic >= 85%/80%/75% respectively, and you believe it is exceptional, you may attempt to deploy up to 0.25 SOL. Set amount_y = 0.25 (or less). Do NOT apply a fee/TVL condition here — fee/TVL is already enforced upstream by minFeeActiveTvlRatio before you see any candidate. The safety layer will enforce the score and organic thresholds — if they fail, the deploy will be blocked automatically. If you are using this override, include "HIGH CONVICTION" in your decision report.
+   ELIGIBILITY: Any pool ≥24h old with organic ≥55% and score ≥3.0 is eligible for deploy. Do not pre-filter based on age, fee/TVL, or other thresholds — the safety stack handles all of that. When in doubt, call deploy_position and let the executor decide.
 4. Report your decision using EXACTLY this format — no markdown bold, no paragraphs, no extra sections:
 
    If deploying:
@@ -1226,12 +1226,17 @@ async function getDeterministicCloseRule(position, managementConfig) {
     }
   }
 
-  // Rule 4: Trailing Take Profit — exit when position has pulled back 1.5% from a peak ≥ 3%
+  // Rule 4: Trailing Take Profit — exit when position has pulled back trailingDropPct from a peak ≥ trailingTriggerPct
   if (!pnlSuspect && position.pnl_pct != null) {
     const peakPnl = tracked?.peak_pnl ?? 0;
-    if (peakPnl >= 3) {
-      const dropFromPeak = peakPnl - position.pnl_pct;
-      if (dropFromPeak >= 1.5) {
+    const triggerPct = managementConfig.trailingTriggerPct ?? 3;
+    const dropPct    = managementConfig.trailingDropPct    ?? 1.5;
+    const dropFromPeak = peakPnl - position.pnl_pct;
+    const symbol = position.pair ?? position.position?.slice(0, 8) ?? "?";
+
+    if (peakPnl >= triggerPct) {
+      if (dropFromPeak >= dropPct) {
+        console.log(`[TRAILING_TP] ${symbol} peak=${peakPnl.toFixed(2)}% current=${position.pnl_pct.toFixed(2)}% drop=${dropFromPeak.toFixed(2)}% status=FIRE`);
         log("cron", `[MANAGE] Trailing TP — peaked +${peakPnl.toFixed(2)}%, dropped ${dropFromPeak.toFixed(2)}% → closing at ${position.pnl_pct.toFixed(2)}%`);
         return {
           action: "CLOSE",
@@ -1239,8 +1244,12 @@ async function getDeterministicCloseRule(position, managementConfig) {
           reason: `trailing_tp: peaked +${peakPnl.toFixed(2)}%, dropped ${dropFromPeak.toFixed(2)}% from peak`,
           peakPnl,
           dropFromPeak,
+          needs_confirmation: true,
         };
       }
+      console.log(`[TRAILING_TP] ${symbol} peak=${peakPnl.toFixed(2)}% current=${position.pnl_pct.toFixed(2)}% drop=${dropFromPeak.toFixed(2)}% status=armed`);
+    } else {
+      console.log(`[TRAILING_TP] ${symbol} peak=${peakPnl.toFixed(2)}% current=${position.pnl_pct.toFixed(2)}% drop=${dropFromPeak.toFixed(2)}% status=watching`);
     }
   }
 
@@ -1273,7 +1282,7 @@ async function getDeterministicCloseRule(position, managementConfig) {
   }
 
   // Rule 8: Max age
-  const effectiveMaxAgeMinutes = tracked?.maxAgeMinutes ?? (3 * 24 * 60);
+  const effectiveMaxAgeMinutes = tracked?.maxAgeMinutes ?? ((managementConfig.maxPositionAgeDays ?? 3) * 24 * 60);
   const effectiveMaxAgeDays = Math.round(effectiveMaxAgeMinutes / (24 * 60));
   if ((position.age_minutes ?? 0) >= effectiveMaxAgeMinutes) {
     return { action: "CLOSE", rule: 8, reason: `max age reached (${effectiveMaxAgeDays} day${effectiveMaxAgeDays !== 1 ? "s" : ""})` };

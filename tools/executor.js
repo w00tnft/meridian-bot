@@ -1,5 +1,5 @@
 import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
-import { checkPriceVelocity, checkBtcTrend, getPriceInfo } from "./okx.js";
+import { checkPriceVelocity, checkBtcTrend } from "./okx.js";
 import {
   getActiveBin,
   deployPosition,
@@ -148,87 +148,38 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  // ── Tiered Pool Age Gate ────────────────────────────────────────────────
-  // <minPoolAgeHours (6h)    → hard block, no exceptions (not even Discord)
-  // 6–12h                   → Discord signal only; non-Discord blocked
-  // 12–24h                  → Tier 0 HC Override (organic ≥85%, score ≥4.5)
-  // 24–48h                  → Tier 1 HC Override (organic ≥80%, score ≥4.3)
-  // 48–72h                  → Tier 2 HC Override (organic ≥75%, score ≥4.0)
-  // 72h – maxPoolAgeDays    → normal deploy, no restriction
-  // >maxPoolAgeDays (10d)   → hard block (dead pool protection)
-  // Discord pools: 6h floor and 10d ceiling apply; tier checks skipped
+  // ── Pool Age Gate ──────────────────────────────────────────────────────
+  // < 6h            → hard block, no exceptions
+  // 6–24h           → Discord signal fast-track only; non-Discord blocked
+  // 24h – 10 days   → normal deploy, no HC override required
+  // > 10 days       → hard block (dead pool protection)
   const tokenAgeHours = poolDetailTokenCreatedAt(detail);
   const minPoolAgeHours = config.screening.minPoolAgeHours ?? 6;
   const maxPoolAgeHours = (config.screening.maxPoolAgeDays ?? 10) * 24;
 
   if (tokenAgeHours != null) {
-    // Absolute floor — no exceptions
     if (tokenAgeHours < minPoolAgeHours) {
       const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old is below ${minPoolAgeHours}h minimum (no exceptions)`;
       console.log(reason);
       return { pass: false, reason };
     }
 
-    // Dead pool ceiling
     if (tokenAgeHours > maxPoolAgeHours) {
       const reason = `[AGE_GATE] BLOCK — pool ${(tokenAgeHours / 24).toFixed(1)} days old exceeds ${config.screening.maxPoolAgeDays ?? 10}-day maximum (dead pool protection)`;
       console.log(reason);
       return { pass: false, reason };
     }
 
-    if (discordFastTrack) {
-      // Discord pools: 6h floor and 10d ceiling already checked above — pass through
-      console.log(`[AGE_GATE] Discord signal pool ${tokenAgeHours.toFixed(1)}h old — fast-track eligible (6h–10d window)`);
-    } else {
-      // Non-Discord: enforce tier windows
-      if (tokenAgeHours < 12) {
-        const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old requires Discord signal (6-12h window: Discord only)`;
+    if (tokenAgeHours < 24) {
+      if (discordFastTrack) {
+        console.log(`[AGE_GATE] Discord signal pool ${tokenAgeHours.toFixed(1)}h old — fast-track eligible (6-24h window)`);
+      } else {
+        const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old requires Discord signal (6-24h window: Discord only)`;
         console.log(reason);
         return { pass: false, reason };
       }
-
-      if (tokenAgeHours < 72) {
-        const organicScore = numberOrNull(detail?.organic_score ?? args.organic_score);
-        const feeTvlRatio  = numberOrNull(feeActiveTvlRatio ?? args.fee_tvl_ratio);
-        const score        = numberOrNull(args.score);
-        const amountSol    = numberOrNull(args.amount_y ?? args.amount_sol ?? 0);
-
-        let tierNum, tierLabel, tierWindow, tierCfg;
-        if (tokenAgeHours < 24) {
-          tierNum = 0; tierLabel = "Tier 0"; tierWindow = "12-24h";
-          tierCfg = config.screening.tier0Override ?? { minOrganic: 85, minScore: 4.5 };
-        } else if (tokenAgeHours < 48) {
-          tierNum = 1; tierLabel = "Tier 1"; tierWindow = "24-48h";
-          tierCfg = config.screening.tier1Override ?? { minOrganic: 80, minScore: 4.3 };
-        } else {
-          tierNum = 2; tierLabel = "Tier 2"; tierWindow = "48-72h";
-          tierCfg = config.screening.tier2Override ?? { minOrganic: 75, minScore: 4.0 };
-        }
-
-        const { minOrganic, minScore } = tierCfg;
-        console.log(`[AGE_GATE] Pool ${tokenAgeHours.toFixed(1)}h old — ${tierLabel} HC required (organic ≥${minOrganic}%, score ≥${minScore})`);
-
-        const organicOk = organicScore != null && organicScore >= minOrganic;
-        const scoreOk   = score        != null && score         >= minScore;
-
-        if (organicOk && scoreOk) {
-          log("safety", `[SAFETY] ⚡ ${tierLabel} HC Override: ${tokenAgeHours.toFixed(1)}h pool — organic ${organicScore}%, score ${score}`);
-          return { pass: true, highConviction: true, hcTier: tierNum, tierWindow, tokenAgeHours, organicScore, feeTvlRatio, feeActiveTvlRatio, score, amountSol };
-        }
-
-        const failReasons = [
-          !organicOk && `organic ${organicScore ?? "unknown"}% < ${minOrganic}%`,
-          !scoreOk   && `score ${score ?? "not provided"} < ${minScore}`,
-        ].filter(Boolean).join(", ");
-
-        return {
-          pass: false,
-          reason: `[AGE_GATE] BLOCK — ${tierLabel} HC failed for ${tokenAgeHours.toFixed(1)}h pool: ${failReasons}`,
-        };
-      }
-
-      // 72h–10d: normal deploy
-      console.log(`[AGE_GATE] Pool ${(tokenAgeHours / 24).toFixed(1)} days old — normal deploy eligible`);
+    } else {
+      console.log(`[AGE_GATE] Pool ${(tokenAgeHours / 24).toFixed(1)} days old — eligible for normal deploy`);
     }
   }
 
@@ -1209,33 +1160,20 @@ async function runSafetyChecks(name, args) {
         }
       }
 
-      // ── Jupiter vs OKX price check (always runs) ─────────────
-      // Fetch both prices independently — never relies on LLM-supplied args.
+      // ── Jupiter price check — block only if no price available ──────────
       if (args.base_mint) {
         try {
-          const [jup, okxInfo] = await Promise.all([
-            getJupiterPrice(args.base_mint),
-            getPriceInfo(args.base_mint),
-          ]);
+          const jup = await getJupiterPrice(args.base_mint);
           const jupPrice = jup?.price;
-          const okxPrice = okxInfo?.price;
-          if (jupPrice != null && okxPrice != null && Number.isFinite(jupPrice) && Number.isFinite(okxPrice) && okxPrice > 0) {
-            const pctDiff = Math.abs((jupPrice - okxPrice) / okxPrice) * 100;
-            const maxDivergence = config.screening.maxPriceDivergencePct ?? 8;
-            if (pctDiff > maxDivergence) {
-              const msg = `[PRICE_CHECK] FAIL — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% divergence exceeds ${maxDivergence}% threshold. Skipping deploy.`;
-              console.log('[PRICE_CHECK]', msg);
-              log("safety", msg);
-              return { pass: false, reason: msg };
-            }
-            const passMsg = `[PRICE_CHECK] PASS — Jupiter $${jupPrice.toFixed(6)} vs OKX $${okxPrice.toFixed(6)} — ${pctDiff.toFixed(1)}% within ${maxDivergence}% tolerance`;
-            console.log('[PRICE_CHECK]', passMsg);
-            log("safety", passMsg);
-          } else {
-            const skipMsg = `[PRICE_CHECK] SKIP — one or both prices unavailable (Jupiter: ${jupPrice ?? "n/a"}, OKX: ${okxPrice ?? "n/a"})`;
-            console.log('[PRICE_CHECK]', skipMsg);
-            log("safety", skipMsg);
+          if (!jupPrice || !Number.isFinite(jupPrice) || jupPrice <= 0) {
+            const msg = `[PRICE_CHECK] BLOCK — no Jupiter price available for ${args.base_mint}`;
+            console.log(msg);
+            log("safety", msg);
+            return { pass: false, reason: msg };
           }
+          const passMsg = `[PRICE_CHECK] PASS — Jupiter $${jupPrice.toFixed(6)}`;
+          console.log('[PRICE_CHECK]', passMsg);
+          log("safety", passMsg);
         } catch (e) {
           console.log(`[PRICE_CHECK] Error during price check: ${e.message}`);
           log("executor_warn", `[PRICE_CHECK] Error during price check: ${e.message}`);

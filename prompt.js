@@ -131,11 +131,12 @@ POOL MEMORY: Past losses or problems → strong skip signal.
 
 DEPLOY RULES:
 - base_mint is MANDATORY in every deploy_position call — never omit it.
-- COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
+- Deploy amount: amount_y MUST equal the Deploy amount shown in the SCREENING CYCLE header exactly. Never round down, never use a different value.
+- ELIGIBILITY: Any pool ≥24h old with organic ≥55% and score ≥3.0 is eligible. Do NOT pre-filter by age, fee/TVL, or any other threshold — the safety stack enforces all of that. If unsure, call deploy_position and let the executor decide.
 - bins_below = round(config.strategy.minBinsBelow + (candidate volatility/5)*(config.strategy.maxBinsBelow-config.strategy.minBinsBelow)) clamped to [minBinsBelow,maxBinsBelow]. Volatility must be a positive number; 0/unknown means skip.
 - bins_above: for spot strategy, set to at least 30% of bins_below to buffer upside (e.g. bins_below=60 → bins_above≥18). For bid_ask, set equal to bins_below. The system will auto-correct if too low, but passing the right value avoids unnecessary log noise.
 - Use amount_y only, keep amount_x=0. Do NOT choose strategy or bin_step — the system hardcodes these from volatility data.
-- Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
+- Pick ONE pool. Skipping is valid only if NO candidate has organic ≥55% and score ≥3.0 — not because you think it might fail a safety check.
 
 ${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest attributes align with high-weight signals.\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;
