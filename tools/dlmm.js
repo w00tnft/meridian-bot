@@ -151,9 +151,11 @@ async function sendWithRpcFallback(tx, signers, { isClose = false } = {}) {
         }).catch(() => {});
         continue;
       }
+      console.error('[RPC_ERROR]', err.message, err.stack);
       throw err;
     }
   }
+  console.error('[RPC_ERROR] All fallbacks exhausted:', lastError?.message, lastError?.stack);
   throw lastError;
 }
 
@@ -819,6 +821,7 @@ export async function deployPosition({
         txs: normalizeExecutionSignatures(submit),
       };
     } catch (error) {
+      console.error('[DEPLOY_ERROR] HiveMind relay failed:', error.message, error.stack);
       log("deploy_error", `Relay deploy failed: ${error.message}`);
       return { success: false, error: error.message };
     }
@@ -950,6 +953,7 @@ export async function deployPosition({
       txs: txHashes,
     };
   } catch (error) {
+    console.error('[DEPLOY_ERROR] SDK failed:', error.message, error.stack);
     log("deploy_error", error.message);
     return { success: false, error: error.message };
   }
