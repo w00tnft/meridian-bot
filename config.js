@@ -63,7 +63,7 @@ export const config = {
   // ─── Pool Screening Thresholds ───────────
   screening: {
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
-    minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
+    minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.005,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
@@ -119,10 +119,11 @@ export const config = {
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,
     positionSizePct:       u.positionSizePct       ?? 0.35,
-    // Trailing take-profit
+    // Trailing take-profit (trailingTpPct / trailingTpDropPct are accepted aliases)
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
-    trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
-    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    trailingTriggerPct:    u.trailingTriggerPct    ?? u.trailingTpPct     ?? 3,    // activate trailing at X% PnL
+    trailingDropPct:       u.trailingDropPct       ?? u.trailingTpDropPct ?? 1.5,  // close when drops X% from peak
+    maxPositionAgeDays:    u.maxPositionAgeDays    ?? 3,
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
