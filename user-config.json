@@ -19,5 +19,6 @@
   "maxPoolAgeDays": 10,
   "trailingTpPct": 3,
   "trailingTpDropPct": 1.5,
-  "maxPositionAgeDays": 3
+  "maxPositionAgeDays": 3,
+  "maxSteps": 30
 }
