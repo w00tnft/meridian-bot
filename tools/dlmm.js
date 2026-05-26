@@ -643,6 +643,8 @@ export async function deployPosition({
     );
   }
 
+  console.log('[DEPLOY_ENTRY]', JSON.stringify({ pool_address, finalAmountY, finalAmountX, relay: shouldUseLpAgentRelayForDeploy(), dry_run: process.env.DRY_RUN === "true" }));
+
   if (process.env.DRY_RUN === "true") {
     return {
       dry_run: true,
@@ -797,7 +799,7 @@ export async function deployPosition({
         },
       });
 
-      return {
+      const relayResult = {
         success: true,
         relay: true,
         request_id: order.requestId,
@@ -820,6 +822,8 @@ export async function deployPosition({
         amount_y: finalAmountY,
         txs: normalizeExecutionSignatures(submit),
       };
+      console.log('[DEPLOY_FINAL]', JSON.stringify({ success: relayResult.success, txid: relayResult.txs?.[0], error: relayResult.error }));
+      return relayResult;
     } catch (error) {
       console.error('[DEPLOY_ERROR] HiveMind relay failed:', error.message, error.stack);
       log("deploy_error", `Relay deploy failed: ${error.message}`);
@@ -931,7 +935,7 @@ export async function deployPosition({
       },
     });
 
-    return {
+    const sdkResult = {
       success: true,
       position: newPosition.publicKey.toString(),
       pool: pool_address,
@@ -952,6 +956,8 @@ export async function deployPosition({
       amount_y: finalAmountY,
       txs: txHashes,
     };
+    console.log('[DEPLOY_FINAL]', JSON.stringify({ success: sdkResult.success, txid: sdkResult.txs?.[0], error: sdkResult.error }));
+    return sdkResult;
   } catch (error) {
     console.error('[DEPLOY_ERROR] SDK failed:', error.message, error.stack);
     log("deploy_error", error.message);
