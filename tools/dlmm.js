@@ -665,21 +665,27 @@ export async function deployPosition({
   }
 
   const isWideRange = totalBins > 69;
+  console.log('[DEPLOY_STEP]', 'A — isWideRange computed', { isWideRange, activeBin: activeBin ? { binId: activeBin.binId } : null });
   const minBinId = activeBin.binId - activeBinsBelow;
+  console.log('[DEPLOY_STEP]', 'B — minBinId computed', { minBinId });
   const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
+  console.log('[DEPLOY_STEP]', 'C — maxBinId computed', { maxBinId, isSingleSidedSol });
 
   console.log('[DEPLOY_SDK]', { totalBins, minBinsBelow, strategy: activeStrategy, isSingleSidedSol, bins_above: activeBinsAbove, bins_below: activeBinsBelow, activeBinId: activeBin?.binId, minBinId, maxBinId });
 
+  console.log('[DEPLOY_STEP]', 'D — before minBinId>maxBinId check');
   if (minBinId > maxBinId) {
     throw new Error(`Invalid bin range: ${minBinId} -> ${maxBinId}`);
   }
+  console.log('[DEPLOY_STEP]', 'E — before isSingleSidedSol maxBinId check');
   if (isSingleSidedSol && maxBinId !== activeBin.binId) {
     throw new Error(
       `Single-side SOL deploy must end at the SDK active bin. Expected ${activeBin.binId}, got ${maxBinId}.`,
     );
   }
-
+  console.log('[DEPLOY_STEP]', 'F — before assertRangeDoesNotRequireBinArrayInitialization');
   await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
+  console.log('[DEPLOY_STEP]', 'G — assertRange passed');
 
   const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
   const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
