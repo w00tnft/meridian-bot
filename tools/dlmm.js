@@ -617,11 +617,6 @@ export async function deployPosition({
     throw new Error("Invalid deploy amount: provide a positive amount_y/amount_sol.");
   }
   const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
-  if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || Number(upside_pct ?? 0) > 0)) {
-    throw new Error(
-      "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
-    );
-  }
   if (isSingleSidedSol) {
     activeBinsAbove = 0;
   }
@@ -638,6 +633,7 @@ export async function deployPosition({
   }
   const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
   const totalBins = activeBinsBelow + activeBinsAbove;
+  console.log('[DEPLOY_TOTALBINS]', { totalBins, minBinsBelow, bins_above: activeBinsAbove, bins_below: activeBinsBelow });
   if (totalBins < minBinsBelow) {
     throw new Error(
       `Invalid deploy range: total bins ${totalBins} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
