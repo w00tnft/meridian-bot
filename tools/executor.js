@@ -149,38 +149,20 @@ async function validateDeployPoolThresholds(args) {
   }
 
   // ── Pool Age Gate ──────────────────────────────────────────────────────
-  // < 6h            → hard block, no exceptions
-  // 6–24h           → Discord signal fast-track only; non-Discord blocked
-  // 24h – 10 days   → normal deploy, no HC override required
-  // > 10 days       → hard block (dead pool protection)
+  // < 12h  → hard block, no exceptions
+  // 12-48h → normal deploy eligible
+  // > 48h  → hard block (dead pool / momentum gone)
   const tokenAgeHours = poolDetailTokenCreatedAt(detail);
-  const minPoolAgeHours = config.screening.minPoolAgeHours ?? 6;
-  const maxPoolAgeHours = (config.screening.maxPoolAgeDays ?? 10) * 24;
+  const minPoolAgeHours = config.screening.minPoolAgeHours ?? 12;
+  const maxPoolAgeHours = config.screening.maxPoolAgeHours ?? 48;
 
   if (tokenAgeHours != null) {
-    if (tokenAgeHours < minPoolAgeHours) {
-      const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old is below ${minPoolAgeHours}h minimum (no exceptions)`;
+    if (tokenAgeHours < minPoolAgeHours || tokenAgeHours > maxPoolAgeHours) {
+      const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old is outside ${minPoolAgeHours}-${maxPoolAgeHours}h deploy window`;
       console.log(reason);
       return { pass: false, reason };
     }
-
-    if (tokenAgeHours > maxPoolAgeHours) {
-      const reason = `[AGE_GATE] BLOCK — pool ${(tokenAgeHours / 24).toFixed(1)} days old exceeds ${config.screening.maxPoolAgeDays ?? 10}-day maximum (dead pool protection)`;
-      console.log(reason);
-      return { pass: false, reason };
-    }
-
-    if (tokenAgeHours < 24) {
-      if (discordFastTrack) {
-        console.log(`[AGE_GATE] Discord signal pool ${tokenAgeHours.toFixed(1)}h old — fast-track eligible (6-24h window)`);
-      } else {
-        const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old requires Discord signal (6-24h window: Discord only)`;
-        console.log(reason);
-        return { pass: false, reason };
-      }
-    } else {
-      console.log(`[AGE_GATE] Pool ${(tokenAgeHours / 24).toFixed(1)} days old — eligible for normal deploy`);
-    }
+    console.log(`[AGE_GATE] Pool ${tokenAgeHours.toFixed(1)}h old — within ${minPoolAgeHours}-${maxPoolAgeHours}h deploy window`);
   }
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
@@ -950,19 +932,29 @@ async function runSafetyChecks(name, args) {
         // volatility_blocked removed — price velocity covers this already
 
         const range24h = Math.abs(velocity.price_change_24h ?? velocity.price_change_1h ?? 0);
+        const priceChange1h = velocity.price_change_1h ?? null;
         _volatility24h = range24h;
 
         // ── Hardcoded distribution strategy (LLM never chooses this) ──
-        // HARDCODED STRATEGY — curve removed entirely
+        // Priority 1: 1h price direction overrides volatility-based selection
+        // Priority 2: volatility-based fallback when 1h data is unavailable or neutral
         let hardcodedStrategy;
-        if (range24h >= 5) {
+        if (priceChange1h != null && priceChange1h < -5) {
+          hardcodedStrategy = "spot";
+          console.log(`[STRATEGY_SELECT] dump detected (${priceChange1h.toFixed(1)}% 1h) → spot single-side SOL`);
+        } else if (priceChange1h != null && priceChange1h > 5) {
           hardcodedStrategy = "bid_ask";
+          console.log(`[STRATEGY_SELECT] pump detected (+${priceChange1h.toFixed(1)}% 1h) → bid_ask balanced`);
+        } else if (range24h >= 5) {
+          hardcodedStrategy = "bid_ask";
+          console.log(`[STRATEGY_SELECT] neutral 1h (${priceChange1h != null ? priceChange1h.toFixed(1) + "%" : "n/a"}), high volatility 24h (${range24h.toFixed(1)}%) → bid_ask balanced`);
         } else {
           hardcodedStrategy = "spot";
+          console.log(`[STRATEGY_SELECT] neutral 1h (${priceChange1h != null ? priceChange1h.toFixed(1) + "%" : "n/a"}), low volatility 24h (${range24h.toFixed(1)}%) → spot single-side SOL`);
         }
         args.strategy = hardcodedStrategy;
         _strategyLabel = hardcodedStrategy === "bid_ask" ? "BID-ASK (balanced)" : "SPOT (SOL-only)";
-        log("strategy", `[STRATEGY] Hardcoded: ${hardcodedStrategy} (volatility: ${range24h.toFixed(1)}%)`);
+        log("strategy", `[STRATEGY] Hardcoded: ${hardcodedStrategy} (volatility: ${range24h.toFixed(1)}%, 1h: ${priceChange1h != null ? priceChange1h.toFixed(1) + "%" : "n/a"})`);
 
         // DEPLOYMENT MODE: spot = single-side SOL only
         if (hardcodedStrategy === "spot") {

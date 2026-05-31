@@ -1153,6 +1153,7 @@ async function getDeterministicCloseRule(position, managementConfig) {
       position.active_bin > position.upper_bin &&
       (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
     ) {
+      console.log(`[OOR_CLOSE] ${position.pair ?? position.position?.slice(0, 8)} OOR ${position.minutes_out_of_range}min — closing to redeploy capital (Discord signal)`);
       return { action: "CLOSE", rule: 6, reason: "OOR" };
     }
 
@@ -1199,6 +1200,7 @@ async function getDeterministicCloseRule(position, managementConfig) {
 
   // Rule 1: Stop loss
   const effectiveStopLoss = tracked?.stopLossPct ?? managementConfig.stopLossPct;
+  console.log(`[SL_CHECK] ${position.pair ?? position.position?.slice(0, 8)} pnl=${position.pnl_pct}% effectiveSL=${effectiveStopLoss}% (tracked=${tracked?.stopLossPct ?? "none"} config=${managementConfig.stopLossPct})`);
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= effectiveStopLoss) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
@@ -1269,6 +1271,7 @@ async function getDeterministicCloseRule(position, managementConfig) {
     position.active_bin > position.upper_bin &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
+    console.log(`[OOR_CLOSE] ${position.pair ?? position.position?.slice(0, 8)} OOR ${position.minutes_out_of_range}min — closing to redeploy capital`);
     return { action: "CLOSE", rule: 6, reason: "OOR" };
   }
 
