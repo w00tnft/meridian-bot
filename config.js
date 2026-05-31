@@ -67,6 +67,7 @@ export const config = {
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
+    minVolume24h:      u.minVolume24h      ?? 50000,
     minOrganic:        u.minOrganic        ?? 60,
     minQuoteOrganic:   u.minQuoteOrganic   ?? 60,
     minHolders:        u.minHolders        ?? 500,
@@ -90,8 +91,9 @@ export const config = {
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:          u.athFilterPct          ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
     maxPriceDivergencePct: u.maxPriceDivergencePct ?? 8,    // Jupiter vs OKX max allowed % divergence
-    minPoolAgeHours:    u.minPoolAgeHours    ?? 6,    // absolute floor — no deploy below this (no exceptions)
-    maxPoolAgeDays:     u.maxPoolAgeDays     ?? 10,   // dead pool ceiling — block above this
+    minPoolAgeHours:    u.minPoolAgeHours    ?? 12,   // absolute floor — no deploy below this (no exceptions)
+    maxPoolAgeHours:    u.maxPoolAgeHours    ?? 48,   // hard ceiling — block pools older than this
+    maxPoolAgeDays:     u.maxPoolAgeDays     ?? 10,   // legacy key — ignored when maxPoolAgeHours is set
     tier0Override:      u.tier0Override      ?? { minOrganic: 85, minScore: 4.5 }, // 12-24h HC gate
     tier1Override:      u.tier1Override      ?? { minOrganic: 80, minScore: 4.3 }, // 24-48h HC gate
     tier2Override:      u.tier2Override      ?? { minOrganic: 75, minScore: 4.0 }, // 48-72h HC gate
