@@ -82,6 +82,10 @@ function poolDetailTokenCreatedAt(pool) {
   return Math.floor((Date.now() - Number(ts)) / 3_600_000); // hours old
 }
 
+function poolDetailOrganicScore(pool) {
+  return numberOrNull(pool?.organic_score ?? pool?.organic);
+}
+
 async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.timeframe || "5m") {
   const encodedTimeframe = encodeURIComponent(timeframe);
   const filter = encodeURIComponent(`pool_address=${poolAddress}`);
@@ -149,20 +153,50 @@ async function validateDeployPoolThresholds(args) {
   }
 
   // ── Pool Age Gate ──────────────────────────────────────────────────────
-  // < 12h  → hard block, no exceptions
-  // 12-48h → normal deploy eligible
-  // > 48h  → hard block (dead pool / momentum gone)
+  // < 24h          → hard block, no exceptions
+  // 24-48h (Tier 1) → organic ≥80%, score ≥4.3 required
+  // 48-72h (Tier 2) → organic ≥75%, score ≥4.0 required
+  // 72h+           → normal deploy, no HC override required
+  // No upper age limit
   const tokenAgeHours = poolDetailTokenCreatedAt(detail);
-  const minPoolAgeHours = config.screening.minPoolAgeHours ?? 12;
-  const maxPoolAgeHours = config.screening.maxPoolAgeHours ?? 48;
 
   if (tokenAgeHours != null) {
-    if (tokenAgeHours < minPoolAgeHours || tokenAgeHours > maxPoolAgeHours) {
-      const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old is outside ${minPoolAgeHours}-${maxPoolAgeHours}h deploy window`;
+    if (tokenAgeHours < 24) {
+      const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old is below 24h minimum (no exceptions)`;
       console.log(reason);
       return { pass: false, reason };
     }
-    console.log(`[AGE_GATE] Pool ${tokenAgeHours.toFixed(1)}h old — within ${minPoolAgeHours}-${maxPoolAgeHours}h deploy window`);
+
+    const tier1 = config.screening.tier1Override ?? { minOrganic: 80, minScore: 4.3 };
+    const tier2 = config.screening.tier2Override ?? { minOrganic: 75, minScore: 4.0 };
+    const organicScore = poolDetailOrganicScore(detail) ?? args.organic_score ?? null;
+    const candidateScore = args.score ?? null;
+
+    if (tokenAgeHours < 48) {
+      if (
+        organicScore != null && candidateScore != null &&
+        organicScore >= tier1.minOrganic && candidateScore >= tier1.minScore
+      ) {
+        console.log(`[AGE_GATE] Tier 1 override: pool ${tokenAgeHours.toFixed(1)}h old — organic ${organicScore}% ≥${tier1.minOrganic}%, score ${candidateScore} ≥${tier1.minScore}`);
+      } else {
+        const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old (24-48h Tier 1 window requires organic ≥${tier1.minOrganic}%, score ≥${tier1.minScore}; got organic=${organicScore ?? "?"}%, score=${candidateScore ?? "?"})`;
+        console.log(reason);
+        return { pass: false, reason };
+      }
+    } else if (tokenAgeHours < 72) {
+      if (
+        organicScore != null && candidateScore != null &&
+        organicScore >= tier2.minOrganic && candidateScore >= tier2.minScore
+      ) {
+        console.log(`[AGE_GATE] Tier 2 override: pool ${tokenAgeHours.toFixed(1)}h old — organic ${organicScore}% ≥${tier2.minOrganic}%, score ${candidateScore} ≥${tier2.minScore}`);
+      } else {
+        const reason = `[AGE_GATE] BLOCK — pool ${tokenAgeHours.toFixed(1)}h old (48-72h Tier 2 window requires organic ≥${tier2.minOrganic}%, score ≥${tier2.minScore}; got organic=${organicScore ?? "?"}%, score=${candidateScore ?? "?"})`;
+        console.log(reason);
+        return { pass: false, reason };
+      }
+    } else {
+      console.log(`[AGE_GATE] Pool ${(tokenAgeHours / 24).toFixed(1)} days old — eligible for normal deploy`);
+    }
   }
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
@@ -932,29 +966,18 @@ async function runSafetyChecks(name, args) {
         // volatility_blocked removed — price velocity covers this already
 
         const range24h = Math.abs(velocity.price_change_24h ?? velocity.price_change_1h ?? 0);
-        const priceChange1h = velocity.price_change_1h ?? null;
         _volatility24h = range24h;
 
         // ── Hardcoded distribution strategy (LLM never chooses this) ──
-        // Priority 1: 1h price direction overrides volatility-based selection
-        // Priority 2: volatility-based fallback when 1h data is unavailable or neutral
         let hardcodedStrategy;
-        if (priceChange1h != null && priceChange1h < -5) {
-          hardcodedStrategy = "spot";
-          console.log(`[STRATEGY_SELECT] dump detected (${priceChange1h.toFixed(1)}% 1h) → spot single-side SOL`);
-        } else if (priceChange1h != null && priceChange1h > 5) {
+        if (range24h >= 5) {
           hardcodedStrategy = "bid_ask";
-          console.log(`[STRATEGY_SELECT] pump detected (+${priceChange1h.toFixed(1)}% 1h) → bid_ask balanced`);
-        } else if (range24h >= 5) {
-          hardcodedStrategy = "bid_ask";
-          console.log(`[STRATEGY_SELECT] neutral 1h (${priceChange1h != null ? priceChange1h.toFixed(1) + "%" : "n/a"}), high volatility 24h (${range24h.toFixed(1)}%) → bid_ask balanced`);
         } else {
           hardcodedStrategy = "spot";
-          console.log(`[STRATEGY_SELECT] neutral 1h (${priceChange1h != null ? priceChange1h.toFixed(1) + "%" : "n/a"}), low volatility 24h (${range24h.toFixed(1)}%) → spot single-side SOL`);
         }
         args.strategy = hardcodedStrategy;
         _strategyLabel = hardcodedStrategy === "bid_ask" ? "BID-ASK (balanced)" : "SPOT (SOL-only)";
-        log("strategy", `[STRATEGY] Hardcoded: ${hardcodedStrategy} (volatility: ${range24h.toFixed(1)}%, 1h: ${priceChange1h != null ? priceChange1h.toFixed(1) + "%" : "n/a"})`);
+        log("strategy", `[STRATEGY] Hardcoded: ${hardcodedStrategy} (volatility: ${range24h.toFixed(1)}%)`);
 
         // DEPLOYMENT MODE: spot = single-side SOL only
         if (hardcodedStrategy === "spot") {
